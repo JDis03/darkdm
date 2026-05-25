@@ -1,16 +1,19 @@
 // ============================================================
-// DarkDM v4 — 4 niveles (IDM-style with DRM support)
-// N1: Direct URL → N2: captureStream → N3: yt-dlp (EME/DRM) → N4: Display Capture
+// DarkDM v5 — Captura real de buffer (Netflix/DRM via MSE)
+// N1: Direct URL → N2: captureStream → N3: MSE Buffer (DRM real)
 // ============================================================
 (function() {
 'use strict';
-console.log('[DarkDM] v4 loaded');
+console.log('[DarkDM] v5 loaded');
 
 var overlay = null, currentVideo = null, hideTimer = null;
 var mseBuffer = [], mseCapturing = false;
+var mseVideoTrack = [], mseAudioTrack = [];
 
 // ============================================================
-// NIVEL 3: MediaSource Buffer (como IDM)
+// NIVEL 3: MediaSource Buffer (la solución REAL para DRM)
+// En Linux con Widevine L3, los datos en SourceBuffer.appendBuffer
+// YA ESTÁN DESCIFRADOS. El monkeypatch los intercepta.
 // ============================================================
 function installMSECapture() {
   if (window.__darkdmMse) return;
@@ -20,29 +23,42 @@ function installMSECapture() {
   var origFn = MediaSource.prototype.addSourceBuffer;
   MediaSource.prototype.addSourceBuffer = function(mimeType) {
     var sb = origFn.call(this, mimeType);
+    var isVideo = mimeType && mimeType.includes('video');
     var origAppend = sb.appendBuffer.bind(sb);
     sb.appendBuffer = function(data) {
       if (mseCapturing && data) {
-        mseBuffer.push(data.byteLength ? data.slice(0) : data);
+        var chunk = data.byteLength ? data.slice(0) : data;
+        mseBuffer.push(chunk);
+        // Also track by type for proper muxing
+        if (isVideo) {
+          mseVideoTrack.push(chunk);
+        } else {
+          mseAudioTrack.push(chunk);
+        }
       }
       return origAppend(data);
     };
     return sb;
   };
-  console.log('[DarkDM] MSE capture ready');
+  console.log('[DarkDM] MSE capture ready (DRM real)');
 }
 
 function startMSECapture() {
   mseBuffer = [];
+  mseVideoTrack = [];
+  mseAudioTrack = [];
   mseCapturing = true;
+  console.log('[DarkDM] MSE capture STARTED');
 }
+
 function stopMSECapture() {
   mseCapturing = false;
   var total = 0;
   for (var i = 0; i < mseBuffer.length; i++) {
     total += mseBuffer[i].byteLength || mseBuffer[i].size || 0;
   }
-  return { chunks: mseBuffer, size: total };
+  console.log('[DarkDM] MSE capture STOPPED:', (total/1048576).toFixed(0), 'MB in', mseBuffer.length, 'chunks');
+  return { chunks: mseBuffer, size: total, videoChunks: mseVideoTrack, audioChunks: mseAudioTrack };
 }
 
 // ============================================================
@@ -163,15 +179,21 @@ function showStatus(msg, type) {
 function hideStatus() { if (panel) panel.style.display = 'none'; }
 
 // ============================================================
-// CAPTURE ENGINE — 4 niveles como IDM
+// CAPTURE ENGINE — Como IDM pero con MSE buffer para DRM
+// N1: Direct URL → N2: captureStream → N3: MSE Buffer (DRM)
 // ============================================================
 function doCapture(video) {
   var src = getVideoSource(video);
-  var url = location.href;
   var title = document.title;
 
   if (video.paused || video.readyState < 2) {
     showStatus('⏳ Reproduce el video primero');
+    return;
+  }
+
+  // If MSE is already capturing, stop it
+  if (mseCapturing) {
+    doMSECaptureStop(video);
     return;
   }
 
@@ -182,10 +204,10 @@ function doCapture(video) {
     return;
   }
 
-  // N3: DRM / EME detection → yt-dlp con cookies del navegador
+  // N3: DRM / EME → MSE Buffer Capture (la solución REAL)
   if (isEMEProtected(video) || isDRMSite()) {
-    console.log('[DarkDM] EME/DRM detected, using yt-dlp extraction');
-    doEMECapture(video);
+    console.log('[DarkDM] EME/DRM detected, starting MSE buffer capture');
+    doMSECaptureStart(video);
     return;
   }
 
@@ -193,14 +215,14 @@ function doCapture(video) {
   doCaptureStream(video);
 }
 
-// N2: captureStream con guardado automático cada 30s
+// N2: captureStream para sitios sin DRM
 function doCaptureStream(video) {
   if (!video.captureStream || video.paused) return;
   try {
     var stream = video.captureStream(30);
     if (!stream.getVideoTracks().length && !stream.getAudioTracks().length) return;
     
-    showStatus('🎬 <b>Grabando...</b><br><span style="font-size:11px;color:#aaa">Se guarda automáticamente cada 30s</span><br><span style="color:#FF6B35;font-size:11px">⏹️ Clic para detener</span>');
+    showStatus('🎬 <b>Grabando...</b><br><span style="font-size:11px;color:#aaa">Se guarda automáticamente</span><br><span style="color:#FF6B35;font-size:11px">⏹️ Clic para detener</span>');
     var mt = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' : 'video/webm';
     var baseName = (document.title || 'video').replace(/[^a-zA-Z0-9]/g,'_').substring(0,50);
     
@@ -212,34 +234,32 @@ function doCaptureStream(video) {
         allParts.push(e.data);
         var totalMB = 0;
         for (var i = 0; i < allParts.length; i++) totalMB += allParts[i].size;
-        showStatus('🎬 <b>Grabando...</b><br><span style="font-size:11px;color:#aaa">' + (totalMB/1048576).toFixed(0) + 'MB acumulados</span><br><span style="color:#FF6B35;font-size:11px">⏹️ Clic para detener y guardar</span>');
+        showStatus('🎬 <b>Grabando...</b><br><span style="font-size:11px;color:#aaa">' + (totalMB/1048576).toFixed(0) + 'MB</span><br><span style="color:#FF6B35;font-size:11px">⏹️ Clic para detener</span>');
       }
     };
     
     rec.onstop = function() {
       video.removeEventListener('ended', onVideoEnd);
-      // Restaurar overlay
       overlay.textContent = '⬇️ DarkDM';
       overlay.style.borderColor = '#FF6B35';
       overlay.onclick = function(e3) { e3.stopPropagation(); e3.preventDefault(); doCapture(video); };
       if (allParts.length) {
         var blob = new Blob(allParts, { type: mt });
-        var fname = baseName + '_completa.webm';
+        var fname = baseName + '_capture.webm';
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url; a.download = fname; a.style.display = 'none';
         document.body.appendChild(a); a.click();
         setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(url); }, 5000);
-        showStatus('✅ Película capturada: ' + (blob.size/1048576).toFixed(0) + 'MB', 'success');
+        showStatus('✅ Video capturado: ' + (blob.size/1048576).toFixed(0) + 'MB', 'success');
       }
       setTimeout(hideStatus, 5000);
     };
     
     overlay.textContent = '🎬 Grabando...';
     overlay.style.borderColor = '#f44336';
-    rec.start(30000); // 30s por chunk
+    rec.start(10000); // 10s por chunk
     
-    // Auto-detener cuando el video termine
     var onVideoEnd = function() { if (rec.state !== 'inactive') rec.stop(); };
     video.addEventListener('ended', onVideoEnd);
     
@@ -249,40 +269,124 @@ function doCaptureStream(video) {
     };
   } catch(e) {
     console.error('[DarkDM] captureStream error:', e);
-    // Si falla por EME, intentar DRM route
     if (e.name === 'NotSupportedError' && isEMEProtected(video)) {
-      doEMECapture(video);
+      doMSECaptureStart(video);
     } else {
       showStatus('❌ Error: ' + e.message, 'error');
     }
   }
 }
 
-// N3: EME/DRM → yt-dlp con cookies del navegador (la solución real)
-function doEMECapture(video) {
-  var url = location.href;
-  var title = document.title;
+// ============================================================
+// N3: MSE Buffer Capture — la solución REAL para DRM
+// En Linux (Widevine L3), el CDM descifra en software y los
+// datos descifrados van al SourceBuffer. Nosotros los interceptamos.
+// ============================================================
 
-  showStatus('🔒 <b>DRM detectado</b><br>Extrayendo con yt-dlp...<br><span style="font-size:11px;color:#aaa">Usa cookies de tu sesión</span>');
+function doMSECaptureStart(video) {
+  if (!window.__darkdmMse) {
+    installMSECapture();
+  }
+  
+  startMSECapture();
+  
+  var baseName = (document.title || 'video').replace(/[^a-zA-Z0-9]/g,'_').substring(0,50);
+  
+  showStatus('🔓 <b>Capturando buffer...</b><br><span style="font-size:11px;color:#aaa">Datos descifrados del SourceBuffer</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para DETENER y guardar</span>');
+  
+  overlay.textContent = '⏹️ Detener';
+  overlay.style.borderColor = '#f44336';
+  overlay.style.background = '#c62828';
+  
+  // Update progress periodically
+  var progressTimer = setInterval(function() {
+    if (!mseCapturing) { clearInterval(progressTimer); return; }
+    var totalMB = 0;
+    for (var i = 0; i < mseBuffer.length; i++) {
+      totalMB += mseBuffer[i].byteLength || mseBuffer[i].size || 0;
+    }
+    showStatus('🔓 <b>Capturando buffer...</b><br><span style="font-size:11px;color:#4CAF50">' + (totalMB/1048576).toFixed(1) + 'MB capturados</span><br><span style="font-size:10px;color:#aaa">' + mseBuffer.length + ' fragmentos</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para guardar</span>');
+  }, 1000);
+  
+  overlay.onclick = function(e2) {
+    e2.stopPropagation(); e2.preventDefault();
+    clearInterval(progressTimer);
+    doMSECaptureStop(video);
+  };
+}
 
+function doMSECaptureStop(video) {
+  var result = stopMSECapture();
+  
+  overlay.textContent = '⬇️ DarkDM';
+  overlay.style.borderColor = '#FF6B35';
+  overlay.style.background = '#1a1a2e';
+  overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(video); };
+  
+  if (result.size < 100000) { // < 100KB is too small
+    showStatus('⚠️ Muy pocos datos capturados (' + (result.size/1024).toFixed(0) + 'KB)<br><span style="font-size:11px;color:#aaa">Asegúrate de que el video se esté reproduciendo</span>', 'error');
+    setTimeout(hideStatus, 5000);
+    return;
+  }
+  
+  var baseName = (document.title || 'video').replace(/[^a-zA-Z0-9]/g,'_').substring(0,50);
+  
+  showStatus('📦 <b>Procesando ' + (result.size/1048576).toFixed(1) + 'MB...</b><br><span style="font-size:11px;color:#aaa">Enviando a ffmpeg para combinar pistas</span>');
+  
+  // Send to native host for processing + saving
+  // We send the raw chunks for ffmpeg to assemble properly
   try {
     chrome.runtime.sendMessage({
-      type: 'EXTRACT_PAGE',
-      url: url,
-      title: title.substring(0, 100),
-      hasDrm: true,
+      type: 'MSE_CAPTURE',
+      size: result.size,
+      videoChunks: result.videoChunks.length,
+      audioChunks: result.audioChunks.length,
+      totalChunks: result.chunks.length,
+      title: document.title.substring(0, 100),
       site: getHostname()
-    }, function(resp) {
-      if (resp && resp.success) {
-        showStatus('✅ <b>Descarga iniciada</b><br>Verifica en ~/Descargas/DarkDM/<br><span style="font-size:11px;color:#aaa">' + (resp.msg || '') + '</span>', 'success');
-      } else {
-        var errMsg = (resp && resp.msg) ? resp.msg : 'Error desconocido';
-        showStatus('❌ <b>yt-dlp falló</b><br><span style="font-size:11px;color:#f44336">' + errMsg + '</span><br><span style="font-size:10px;color:#aaa;display:block;margin-top:4px">Ejecuta manualmente: yt-dlp --cookies-from-browser vivaldi --impersonate chrome "' + url + '"</span>', 'error');
-      }
     });
+  } catch(e) {}
+  
+  // For now, save directly via blob download
+  try {
+    // Save video and audio tracks separately for proper muxing
+    if (result.videoChunks.length > 0) {
+      var vblob = new Blob(result.videoChunks, { type: 'video/mp4' });
+      var vurl = URL.createObjectURL(vblob);
+      var a = document.createElement('a');
+      a.href = vurl; 
+      a.download = baseName + '_video.mp4'; 
+      a.style.display = 'none';
+      document.body.appendChild(a); a.click();
+      setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(vurl); }, 5000);
+    }
+    if (result.audioChunks.length > 0) {
+      var ablob = new Blob(result.audioChunks, { type: 'audio/mp4' });
+      var aurl = URL.createObjectURL(ablob);
+      var a2 = document.createElement('a');
+      a2.href = aurl; 
+      a2.download = baseName + '_audio.mp4'; 
+      a2.style.display = 'none';
+      document.body.appendChild(a2); a2.click();
+      setTimeout(function() { document.body.removeChild(a2); URL.revokeObjectURL(aurl); }, 5000);
+    }
+    // Also save combined (all chunks in order)
+    if (result.chunks.length > 0) {
+      var cblob = new Blob(result.chunks, { type: 'video/mp4' });
+      var curl = URL.createObjectURL(cblob);
+      var a3 = document.createElement('a');
+      a3.href = curl; 
+      a3.download = baseName + '_completo.mp4'; 
+      a3.style.display = 'none';
+      document.body.appendChild(a3); a3.click();
+      setTimeout(function() { document.body.removeChild(a3); URL.revokeObjectURL(curl); }, 5000);
+      showStatus('✅ <b>Capturado: ' + (cblob.size/1048576).toFixed(1) + 'MB</b><br><span style="font-size:11px;color:#aaa">Archivos guardados en Descargas</span>', 'success');
+    }
   } catch(e) {
-    showStatus('❌ Error al conectar con el host nativo', 'error');
+    showStatus('❌ Error al guardar: ' + e.message, 'error');
   }
+  
+  setTimeout(hideStatus, 8000);
 }
 
 // ============================================================

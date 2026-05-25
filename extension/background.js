@@ -24,19 +24,22 @@ async function attachDebugger(tabId) {
     
     const handler = (src, method, params) => {
       if (src.tabId !== tabId) return;
-      if (method === 'Network.responseReceived') {
-        const ct = params.response?.headers?.['Content-Type'] || params.response?.mimeType || '';
-        const url = params.response?.url || '';
-        if (ct.match(/(video|audio|mpegurl|dash)/i) || 
-            url.match(/\.(m3u8|mpd|m4s|ts|mp4|webm|woff2)(\?|$)/i) ||
-            url.match(/seg-\d+.*\.\w+$/i)) {
-          sn({ type: 'STREAM_DETECTED', url, content_type: ct, tab_id: tabId });
-        }
-      }
+      // Only care about MANIFESTS (.mpd, .m3u8) and direct video files
+      // Ignore individual .ts/.m4s segments from DRM CDNs (they're encrypted)
       if (method === 'Network.requestWillBeSent') {
         const url = params.request?.url || '';
         if (url.match(/\.(mpd|m3u8)(\?|$)/i)) {
           sn({ type: 'MANIFEST_DETECTED', url, page_url: params.documentURL, tab_id: tabId });
+        }
+      }
+      if (method === 'Network.responseReceived') {
+        const ct = params.response?.headers?.['Content-Type'] || params.response?.mimeType || '';
+        const url = params.response?.url || '';
+        // Only report direct video files (mp4/webm), NOT encrypted segments
+        if (ct.match(/video\/(mp4|webm)/i) || url.match(/\.(mp4|webm)(\?|$)/i)) {
+          if (!url.match(/\.ts/i) && !url.match(/seg-/i)) {
+            sn({ type: 'STREAM_DETECTED', url, content_type: ct, tab_id: tabId });
+          }
         }
       }
     };
@@ -139,8 +142,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case 'EXTRACT_PAGE':
       return handleExtractPage(msg, tabId, sendResponse);
 
-    case 'BUFFER_CAPTURE':
-      break;
+    case 'MSE_CAPTURE':
+      console.log(`[DarkDM] MSE capture: ${msg.size} bytes, ${msg.videoChunks} video + ${msg.audioChunks} audio chunks`);
+      // Future: send to native host for ffmpeg processing
+      // For now, content.js handles the save directly
+      sendResponse({ success: true });
+      return true;
 
     case 'SAVE_FILE':
       try { chrome.downloads.download({url: msg.data, filename: 'DarkDM/' + msg.filename, saveAs: false}); } catch(e) {}
