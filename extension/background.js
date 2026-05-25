@@ -42,27 +42,57 @@ async function attachDebugger(tabId) {
       if (method === 'Network.requestWillBeSent') {
         const url = params.request?.url || '';
         if (url.match(/\.(m3u8|mpd)(\?|$)/i)) {
-          manifestCache[tabId] = {
+          const entry = {
             url: url,
             headers: params.request?.headers || {},
             pageUrl: params.documentURL || '',
             requestId: params.requestId,
             body: null
           };
+          
+          // Store ALL manifests found. The first one is likely the master.
+          // If we already have one, only overwrite if new one looks like master
+          // or if the current one has no body yet.
+          if (!manifestCache[tabId] || !manifestCache[tabId].body) {
+            manifestCache[tabId] = entry;
+          } else if (manifestCache[tabId] && url !== manifestCache[tabId].url) {
+            // Different URL — could be a variant or better manifest
+            console.log('[DarkDM] Additional manifest detected:', url);
+            // Store as a secondary candidate (might be master if we only had variant)
+            manifestCache[tabId + '_secondary'] = entry;
+          }
           console.log('[DarkDM] Manifest detected:', url);
         }
       }
 
       // Get the manifest body when it finishes loading
-      if (method === 'Network.loadingFinished' && manifestCache[tabId]) {
+      if (method === 'Network.loadingFinished') {
         const reqId = params.requestId;
-        if (manifestCache[tabId].requestId === reqId) {
+        // Check primary manifest
+        if (manifestCache[tabId] && manifestCache[tabId].requestId === reqId && !manifestCache[tabId].body) {
           chrome.debugger.sendCommand({ tabId }, 'Network.getResponseBody', { requestId: reqId }, resp => {
             if (resp?.body) {
-              manifestCache[tabId].body = resp.base64Encoded 
-                ? atob(resp.body) 
-                : resp.body;
-              console.log('[DarkDM] Manifest body captured:', manifestCache[tabId].body.length, 'bytes');
+              const decoded = resp.base64Encoded ? atob(resp.body) : resp.body;
+              manifestCache[tabId].body = decoded;
+              console.log('[DarkDM] Manifest body:', decoded.substring(0, 200));
+              // If this is a variant (has EXTINF but no STREAM-INF), 
+              // try to find a master manifest from secondary
+              if (!decoded.includes('#EXT-X-STREAM-INF') && manifestCache[tabId + '_secondary']) {
+                const sec = manifestCache[tabId + '_secondary'];
+                if (sec.body && sec.body.includes('#EXT-X-STREAM-INF')) {
+                  console.log('[DarkDM] Switching to master manifest');
+                  manifestCache[tabId] = sec;
+                }
+              }
+            }
+          });
+        }
+        // Check secondary manifest
+        if (manifestCache[tabId + '_secondary'] && manifestCache[tabId + '_secondary'].requestId === reqId && !manifestCache[tabId + '_secondary'].body) {
+          chrome.debugger.sendCommand({ tabId }, 'Network.getResponseBody', { requestId: reqId }, resp => {
+            if (resp?.body) {
+              manifestCache[tabId + '_secondary'].body = resp.base64Encoded ? atob(resp.body) : resp.body;
+              console.log('[DarkDM] Secondary manifest body:', manifestCache[tabId + '_secondary'].body.substring(0, 200));
             }
           });
         }
@@ -96,8 +126,16 @@ function cookiesToNetscape(cookies) {
 async function downloadStream(tabId, title) {
   if (!tabId) return { success: false, error: 'No tab' };
 
-  // 1) Get manifest from cache (captured by debugger)
-  const manifest = manifestCache[tabId];
+  // 1) Get manifest from cache — prefer master (has #EXT-X-STREAM-INF) over variant
+  let manifest = manifestCache[tabId];
+  const secondary = manifestCache[tabId + '_secondary'];
+  
+  if (secondary?.body?.includes('#EXT-X-STREAM-INF') && !manifest?.body?.includes('#EXT-X-STREAM-INF')) {
+    // Secondary is the master manifest, primary is a variant — switch
+    console.log('[DarkDM] Using master manifest from secondary cache');
+    manifest = secondary;
+  }
+  
   if (!manifest || !manifest.body) {
     return { success: false, error: 'No manifest detected. Make sure video is playing and debugger is attached.' };
   }

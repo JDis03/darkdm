@@ -268,10 +268,14 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 let ytdlp_path = find_binary("yt-dlp").unwrap_or_else(|| "yt-dlp".to_string());
                 
                 let mut ytdlp_cmd = Command::new(&ytdlp_path);
+                
+                // Ensure we get best quality
                 ytdlp_cmd.args(["-o", &output_str, "--no-playlist", 
                                "--concurrent-fragments", "8",
                                "--impersonate", "chrome-131",
                                "--limit-rate", "50M",
+                               "-f", "bestvideo+bestaudio/best",
+                               "--format-sort", "res:1080,codec:av1:nvdec:hevc:h264,br",
                                &manifest_url]);
                 
                 if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
@@ -279,6 +283,9 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 }
                 
                 eprintln!("[DarkDM] Running yt-dlp...");
+                eprintln!("[DarkDM] URL: {}", manifest_url);
+                eprintln!("[DarkDM] Body preview (first 500 chars): {}", 
+                    manifest_body.chars().take(500).collect::<String>());
                 let start = std::time::Instant::now();
                 let status = ytdlp_cmd
                     .stdout(Stdio::null()).stderr(Stdio::null())
