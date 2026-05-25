@@ -18,7 +18,8 @@
     "activeTab",
     "scripting",
     "debugger",
-    "cookies"
+    "cookies",
+    "proxy"
   ],
   "host_permissions": [
     "http://*/*",

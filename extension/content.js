@@ -1,18 +1,13 @@
 // ============================================================
-// DarkDM v7 — Captura de video por Content-Type (bajo nivel)
-// Intercepta cualquier respuesta HTTP con video/* del debugger
+// DarkDM v6 — Captura de manifest + yt-dlp (como IDM)
 // ============================================================
 (function() {
 'use strict';
-console.log('[DarkDM] v7 loaded');
+console.log('[DarkDM] v6 loaded');
 
 var overlay = null, currentVideo = null, hideTimer = null;
-var capturing = false;
-var statusInterval = null;
+var downloading = false;
 
-// ============================================================
-// Find videos
-// ============================================================
 function findAllVideos(root) {
   root = root || document;
   var vids = [];
@@ -50,9 +45,6 @@ function getVideoSource(video) {
   return src;
 }
 
-// ============================================================
-// OVERLAY
-// ============================================================
 function createOverlay(v) {
   removeOverlay();
   var el = document.createElement('div');
@@ -81,9 +73,6 @@ function removeOverlay() {
   currentVideo = null;
 }
 
-// ============================================================
-// STATUS PANEL
-// ============================================================
 var panel = null;
 function showStatus(msg, type) {
   if (!panel) {
@@ -99,82 +88,63 @@ function showStatus(msg, type) {
 function hideStatus() { if (panel) panel.style.display = 'none'; }
 
 // ============================================================
-// CAPTURE — Intercepta respuestas de video del debugger
+// CAPTURE
 // ============================================================
 function doCapture(video) {
-  if (capturing) {
-    // Stop capture
-    stopVideoCapture();
-    return;
-  }
-  
+  var src = getVideoSource(video);
+  var title = document.title;
+
   if (video.paused || video.readyState < 2) {
     showStatus('⏳ Reproduce el video primero');
     return;
   }
-  
-  // Direct URL? Try simple download first
-  var src = getVideoSource(video);
-  if (src && !src.startsWith('blob:') && !src.includes('.m3u8') && !src.includes('.mpd')) {
-    showStatus('⬇️ Descargando video directo...');
-    try { chrome.runtime.sendMessage({ type: 'START_DOWNLOAD', url: src, filename: document.title.substring(0,50) + '.mp4' }); } catch(e) {}
+
+  if (downloading) {
+    showStatus('⏳ Ya hay una descarga en curso');
     return;
   }
-  
-  startVideoCapture();
-}
 
-function startVideoCapture() {
-  capturing = true;
-  
-  showStatus('📡 <b>Capturando video...</b><br><span style="font-size:11px;color:#aaa">Interceptando respuestas de video</span><br><span style="font-size:10px;color:#4CAF50">Esperando segmentos...</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para DETENER y guardar</span>');
-  
-  overlay.textContent = '⏹️ Parar';
-  overlay.style.borderColor = '#f44336';
-  overlay.style.background = '#c62828';
-  
-  // Start capture in background
+  // URL directa
+  if (src && !src.startsWith('blob:') && !src.includes('.m3u8') && !src.includes('.mpd')) {
+    showStatus('⬇️ Descargando video directo...');
+    try { chrome.runtime.sendMessage({ type: 'START_DOWNLOAD', url: src, filename: title.substring(0,50) + '.mp4' }); } catch(e) {}
+    return;
+  }
+
+  // Descargar via manifest + yt-dlp (como IDM)
+  showStatus('📡 <b>Iniciando descarga...</b><br><span style="font-size:11px;color:#aaa">Detectando manifest .m3u8</span>');
+  overlay.textContent = '⏳...';
+  overlay.style.borderColor = '#2196F3';
+  downloading = true;
+
   chrome.runtime.sendMessage({
-    type: 'START_CAPTURE',
-    title: document.title.substring(0, 100)
-  });
-  
-  // Listen for status updates from background
-  chrome.runtime.onMessage.addListener(function statusListener(msg) {
-    if (msg.type === 'CAPTURE_STATUS') {
-      showStatus('📡 <b>Capturando video...</b><br><span style="font-size:11px;color:#aaa">' + msg.captured + ' segmentos capturados</span><br><span style="font-size:10px;color:#4CAF50">' + msg.pending + ' pendientes</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para guardar</span>');
-    }
-  });
-  
-  overlay.onclick = function(e2) {
-    e2.stopPropagation(); e2.preventDefault();
-    stopVideoCapture();
-  };
-}
+    type: 'DOWNLOAD_STREAM',
+    title: title.substring(0, 100),
+    url: location.href
+  }, function(resp) {
+    downloading = false;
+    overlay.textContent = '⬇️ DarkDM';
+    overlay.style.borderColor = '#FF6B35';
+    overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(video); };
 
-function stopVideoCapture() {
-  capturing = false;
-  
-  showStatus('📦 <b>Uniendo segmentos...</b><br><span style="font-size:11px;color:#aaa">Concatenando con ffmpeg</span>');
-  
-  overlay.textContent = '⬇️ DarkDM';
-  overlay.style.borderColor = '#FF6B35';
-  overlay.style.background = '#1a1a2e';
-  overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(currentVideo); };
-  
-  chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, function(resp) {
-    if (resp && resp.success) {
-      showStatus('✅ <b>' + resp.segments + ' segmentos unidos</b><br><span style="font-size:11px;color:#aaa">' + (resp.message || 'Archivo en ~/Descargas/DarkDM/') + '</span>', 'success');
+    if (!resp) {
+      showStatus('❌ No hay respuesta del background', 'error');
+      setTimeout(hideStatus, 4000);
+      return;
+    }
+
+    if (resp.success) {
+      var size = resp.bytes ? ' (' + (resp.bytes / 1048576).toFixed(0) + 'MB)' : '';
+      showStatus('✅ <b>Descarga completada</b>' + size + '<br><span style="font-size:11px;color:#aaa">' + (resp.message || 'Archivo en ~/Descargas/DarkDM/') + '</span>', 'success');
+      setTimeout(hideStatus, 6000);
     } else {
-      showStatus('❌ Error: ' + (resp?.error || 'desconocido'), 'error');
+      showStatus('❌ <b>Error:</b> ' + (resp.error || resp.msg || 'Desconocido'), 'error');
+      setTimeout(hideStatus, 6000);
     }
-    setTimeout(hideStatus, 8000);
   });
 }
 
-// ============================================================
-// MOUSE TRACKING
-// ============================================================
+// Mouse tracking
 var scanTimer = null;
 document.addEventListener('mousemove', function(e) {
   clearTimeout(scanTimer);
@@ -196,7 +166,7 @@ document.addEventListener('mousemove', function(e) {
   }, 150);
 });
 
-// Auto-attach debugger to every tab with video
+// Auto-attach debugger
 setInterval(function() {
   var v = findBestVideo();
   if (v && !v.dataset.ddmReady) {

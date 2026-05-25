@@ -4,8 +4,13 @@
 // ============================================================
 
 mod downloader;
+mod proxy;
 
 use downloader::*;
+use proxy::DarkDMProxy;
+use std::sync::Mutex;
+
+static PROXY_INSTANCE: Mutex<Option<DarkDMProxy>> = Mutex::new(None);
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -244,6 +249,49 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             
             eprintln!("[DarkDM] DOWNLOAD_MANIFEST: {} (body: {} bytes)", manifest_url, manifest_body.len());
             
+            // Check if we have master candidates (from background.js variant detection)
+            let master_candidates: Vec<String> = msg.extra.get("master_candidates")
+                .and_then(|v| v.as_str())
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .unwrap_or_default();
+            
+            // Determine the best URL to use:
+            // If the manifest is a variant (#EXTINF but no #EXT-X-STREAM-INF), try candidates
+            let is_variant = manifest_body.contains("#EXTINF") && !manifest_body.contains("#EXT-X-STREAM-INF");
+            let mut use_url = manifest_url.clone();
+            
+            if is_variant && !master_candidates.is_empty() {
+                eprintln!("[DarkDM] Variant manifest detected, trying {} master candidates", master_candidates.len());
+                for candidate in &master_candidates {
+                    if let Ok(mut resp) = ureq::get(candidate)
+                        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+                        .call() 
+                    {
+                        if let Ok(body) = resp.body_mut().read_to_string() {
+                            if body.contains("#EXT-X-STREAM-INF") {
+                                eprintln!("[DarkDM] Found master manifest: {}", candidate);
+                                use_url = candidate.clone();
+                                break;
+                            }
+                        }
+                    }
+                }
+                if use_url == manifest_url {
+                    eprintln!("[DarkDM] No master found, using variant URL");
+                }
+            } else if manifest_body.contains("#EXT-X-STREAM-INF") {
+                eprintln!("[DarkDM] Master manifest detected directly");
+            } else {
+                eprintln!("[DarkDM] Using provided URL directly");
+            }
+            
+            // Also use extra headers from manifest (Referer, etc.)
+            let referer = if !manifest_body.is_empty() && manifest_body.len() < 50 {
+                manifest_body.to_string() // Some sites put session key in body
+            } else {
+                String::new()
+            };
+            
             // Sanitize title for filename
             let safe_title: String = title.chars()
                 .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
@@ -463,13 +511,66 @@ fn handle_message(msg: &ChromeMessage) -> Response {
         },
 
         // ============================================================
+        // PROXY START - Inicia proxy local para capturar trafico
+        // ============================================================
+        "PROXY_START" => {
+            let session = format!("proxy_{}", chrono_name());
+            
+            let mut proxy = DarkDMProxy::new(&output_dir, &session);
+            match proxy.start() {
+                Ok(()) => {
+                    let port = proxy.port;
+                    // Store proxy instance
+                    if let Ok(mut p) = PROXY_INSTANCE.lock() {
+                        *p = Some(proxy);
+                    }
+                    Response {
+                        msg_type: "PROXY_RUNNING".to_string(),
+                        success: Some(true), error: None,
+                        message: Some(format!("Proxy running on port {}", port)),
+                        progress: None, filename: None,
+                        segments: None, bytes: None,
+                    }
+                },
+                Err(e) => error_response(&format!("Proxy start failed: {}", e)),
+            }
+        },
+
+        // ============================================================
+        // PROXY STOP - Detiene proxy local
+        // ============================================================
+        "PROXY_STOP" => {
+            if let Ok(mut p) = PROXY_INSTANCE.lock() {
+                if let Some(proxy) = p.take() {
+                    proxy.stop();
+                    // Give it a moment to stop
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    let count = proxy.get_segment_count();
+                    // Now concatenate the captured segments
+                    let session_dir = "proxy_".to_string() + &chrono_name(); // approximate
+                    Response {
+                        msg_type: "PROXY_STOPPED".to_string(),
+                        success: Some(true), error: None,
+                        message: Some(format!("Proxy stopped. {} segments captured", count)),
+                        progress: None, filename: None,
+                        segments: Some(count as usize), bytes: None,
+                    }
+                } else {
+                    error_response("No proxy running")
+                }
+            } else {
+                error_response("Failed to access proxy")
+            }
+        },
+
+        // ============================================================
         // PING - Health check
         // ============================================================
         "PING" => Response {
             msg_type: "PONG".to_string(),
             success: Some(true),
             error: None,
-            message: Some(format!("DarkDM Native Host v1.0.0 (HLS+DASH+Direct+SegmentCapture)")),
+            message: Some(format!("DarkDM Native Host v1.0.0 (HLS+DASH+Direct+Proxy)")),
             progress: None, filename: None,
             segments: None, bytes: None,
         },
