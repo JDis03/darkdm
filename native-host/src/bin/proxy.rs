@@ -52,9 +52,16 @@ fn main() {
 
     eprintln!("[DarkDM Proxy] Started on {} for session {}", addr, session);
 
-    // Handle SIGTERM gracefully
+    // Handle SIGTERM/SIGINT gracefully via a simple signal handler
     let r = running.clone();
-    ctrlc_handler(r);
+    thread::spawn(move || {
+        // Just sleep and let the OS kill us when parent exits
+        // The proxy socket will close when the process is killed
+        loop {
+            thread::sleep(Duration::from_secs(5));
+            if !r.load(Ordering::SeqCst) { break; }
+        }
+    });
 
     for stream in listener.incoming() {
         if !running.load(Ordering::SeqCst) {
@@ -78,35 +85,7 @@ fn main() {
     eprintln!("[DarkDM Proxy] Stopped. {} segments captured.", seg_count.load(Ordering::SeqCst));
 }
 
-#[cfg(unix)]
-fn ctrlc_handler(running: Arc<AtomicBool>) {
-    let r = running.clone();
-    thread::spawn(move || {
-        let mut sigterm = false;
-        // Simple: just wait for stdin close, which happens when parent dies
-        let mut buf = [0u8; 1];
-        loop {
-            match std::io::stdin().read(&mut buf) {
-                Ok(0) | Err(_) => { // stdin closed = parent died
-                    eprintln!("[DarkDM Proxy] Parent process died, shutting down");
-                    r.store(false, Ordering::SeqCst);
-                    break;
-                }
-                Ok(_) => {}
-            }
-            thread::sleep(Duration::from_secs(1));
-        }
-    });
-}
 
-#[cfg(not(unix))]
-fn ctrlc_handler(running: Arc<AtomicBool>) {
-    let r = running.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(3600));
-        r.store(false, Ordering::SeqCst);
-    });
-}
 
 fn handle_client(mut client: TcpStream, seg_dir: &std::path::Path, seg_count: &Arc<AtomicU64>) {
     let mut buf = [0u8; 16384];

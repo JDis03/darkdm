@@ -30,16 +30,31 @@ async function startProxyCapture() {
     return { success: false, error: resp?.error || 'Error al iniciar proxy' };
   }
 
-  // 2) Configurar navegador para usar el proxy
+  // 2) Configurar navegador para usar el proxy SOLO para el movie site
+  // Usamos PAC (Proxy Auto-Config) para NO bloquear el resto de sitios
   try {
+    const pacScript = `
+      function FindProxyForURL(url, host) {
+        // Solo proxy para dominios de streaming de video
+        if (shExpMatch(host, "*.solo-latino.com") ||
+            shExpMatch(host, "*.player4me.*") ||
+            shExpMatch(host, "*.solo-latino.*") ||
+            shExpMatch(host, "*.netflix.com") ||
+            shExpMatch(host, "*.primevideo.com") ||
+            shExpMatch(host, "*disney*") ||
+            host.includes("solo-latino") ||
+            host.includes("player4me")) {
+          return "PROXY 127.0.0.1:8899";
+        }
+        return "DIRECT";
+      }
+    `;
+
     await new Promise((resolve, reject) => {
       chrome.proxy.settings.set({
         value: {
-          mode: 'fixed_servers',
-          rules: {
-            singleProxy: { scheme: 'http', host: '127.0.0.1', port: 8899 },
-            bypassList: ['127.0.0.1', 'localhost', '::1']
-          }
+          mode: 'pac_script',
+          pacScript: { data: pacScript }
         },
         scope: 'regular'
       }, () => {
@@ -49,13 +64,33 @@ async function startProxyCapture() {
     });
 
     proxyActive = true;
-    console.log('[DarkDM] Proxy active: localhost:8899');
-    return { success: true, port: 8899, message: resp.message };
+    console.log('[DarkDM] PAC proxy active (selective domains)');
+    return { success: true, port: 8899, message: 'Proxy selectivo activo (solo sitios de video)' };
 
   } catch (e) {
-    // Si falla el proxy, detenerlo
-    await sn({ type: 'PROXY_STOP' });
-    return { success: false, error: 'Error al configurar proxy: ' + e.message };
+    // Si falla, probar modo fixed_servers como fallback
+    try {
+      await new Promise((resolve, reject) => {
+        chrome.proxy.settings.set({
+          value: {
+            mode: 'fixed_servers',
+            rules: {
+              singleProxy: { scheme: 'http', host: '127.0.0.1', port: 8899 },
+              bypassList: ['127.0.0.1', 'localhost', '::1', '<local>']
+            }
+          },
+          scope: 'regular'
+        }, () => {
+          if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+          else resolve();
+        });
+      });
+      proxyActive = true;
+      return { success: true, port: 8899, message: 'Proxy global activo' };
+    } catch (e2) {
+      await sn({ type: 'PROXY_STOP' });
+      return { success: false, error: 'Error al configurar proxy: ' + e.message };
+    }
   }
 }
 
