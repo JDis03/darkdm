@@ -1,14 +1,12 @@
-// DarkDM Background — Proxy con iptables (transparente, sin config browser)
-console.log('[DarkDM] Iptables-proxy loaded');
+// DarkDM — Debugger + yt-dlp (La solución limpia)
+console.log('[DarkDM] Final version loaded');
 
 const NH = 'com.darkdm.manager';
-let proxyActive = false;
-let sudoPassword = '';
+const debuggerTabs = new Set();
+const manifestCache = {};
 
-// Keep alive
-setInterval(() => { chrome.runtime.getPlatformInfo(() => {}); }, 10000);
+setInterval(() => { chrome.runtime.getPlatformInfo(() => {}); }, 15000);
 
-// Native messaging
 function sn(msg) {
   return new Promise(r => {
     try {
@@ -20,125 +18,153 @@ function sn(msg) {
 }
 
 // ============================================================
-// Proxy Capture via iptables (transparente)
+// Debugger — captura manifests por URL y Content-Type
 // ============================================================
-async function startProxyCapture(password, domain) {
-  if (proxyActive) return { success: false, error: 'Proxy ya activo' };
-  sudoPassword = password;
-
-  // 1) Iniciar proxy en native host
-  const resp = await sn({
-    type: 'PROXY_START',
-    sudo_password: password,
-    target_domain: domain
-  });
-
-  if (!resp?.success) {
-    return { success: false, error: resp?.error || 'Error al iniciar proxy' };
-  }
-
-  // 2) Configurar navegador: fixed_servers (todo por el proxy)
-  //    El proxy reenvia todo, no solo video - asi no importa el CDN
+async function attachDebugger(tabId) {
+  if (!chrome.debugger || debuggerTabs.has(tabId)) return;
   try {
-    await new Promise((resolve, reject) => {
-      chrome.proxy.settings.set({
-        value: {
-          mode: 'fixed_servers',
-          rules: {
-            // Solo HTTP por el proxy (los .ts van por HTTP)
-            proxyForHttp: { scheme: 'http', host: '127.0.0.1', port: 8899 },
-            // HTTPS va directo (asi no se bloquea nada)
-            bypassList: ['127.0.0.1', 'localhost', '::1', '<local>']
+    await chrome.debugger.attach({ tabId }, '1.3');
+    await chrome.debugger.sendCommand({ tabId }, 'Network.enable', {
+      maxTotalBufferSize: 100000000,
+      maxResourceBufferSize: 5000000
+    });
+    debuggerTabs.add(tabId);
+
+    chrome.debugger.onEvent.addListener((src, method, params) => {
+      if (src.tabId !== tabId) return;
+
+      // Detectar manifests (.m3u8, .mpd)
+      if (method === 'Network.requestWillBeSent') {
+        const url = params.request?.url || '';
+        const accept = (params.request?.headers?.['Accept'] || '').toLowerCase();
+        if (url.match(/\.(m3u8|mpd)(\?|$)/i) || url.includes('.m3u8') || url.includes('.mpd') ||
+            accept.includes('mpegurl') || accept.includes('dash+xml') ||
+            url.match(/playlist|master\.m3u/i)) {
+          manifestCache[tabId] = {
+            url, headers: params.request?.headers || {},
+            pageUrl: params.documentURL || '',
+            requestId: params.requestId, body: null
+          };
+          console.log('[DarkDM] Manifest:', url.substring(0, 100));
+        }
+      }
+
+      // Capturar body del manifest
+      if (method === 'Network.loadingFinished' && manifestCache[tabId]?.requestId === params.requestId) {
+        chrome.debugger.sendCommand({ tabId }, 'Network.getResponseBody',
+          { requestId: params.requestId }, resp => {
+          if (resp?.body) {
+            manifestCache[tabId].body = resp.base64Encoded ? atob(resp.body) : resp.body;
+            const isMaster = manifestCache[tabId].body.includes('#EXT-X-STREAM-INF');
+            console.log('[DarkDM] Manifest:', isMaster ? 'MASTER' : 'VARIANT',
+              manifestCache[tabId].body.substring(0, 80).replace(/\n/g, ' | '));
           }
-        },
-        scope: 'regular'
-      }, () => {
-        if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-        else resolve();
-      });
+        });
+      }
     });
 
-    proxyActive = true;
-    console.log('[DarkDM] Proxy + fixed_servers active');
-    return { success: true, message: 'Proxy activo (todo el tráfico HTTP por el proxy)' };
-
+    chrome.debugger.onDetach.addListener(() => {
+      debuggerTabs.delete(tabId);
+      delete manifestCache[tabId];
+    });
   } catch (e) {
-    // Si no se puede configurar el proxy del navegador,
-    // el proxy + iptables aun funciona para el dominio especifico
-    if (domain) {
-      proxyActive = true;
-      return { success: true, message: 'Proxy + iptables activo para ' + domain };
-    }
-    await sn({ type: 'PROXY_STOP' });
-    return { success: false, error: 'Error al configurar proxy: ' + e.message };
+    console.error('[DarkDM] Debugger error:', e);
   }
 }
 
-async function stopProxyCapture() {
-  if (!proxyActive) return { success: false, error: 'No hay proxy activo' };
+// ============================================================
+// Buscar mejor manifest
+// ============================================================
+function findBestManifest(tabId) {
+  const m = manifestCache[tabId];
+  if (!m?.body) return m;
 
-  const resp = await sn({ type: 'PROXY_STOP' });
-  proxyActive = false;
-  sudoPassword = '';
-
-  return {
-    success: resp?.success !== false,
-    segments: resp?.segments || 0,
-    message: resp?.message || 'Proxy detenido'
-  };
+  // Si es variante, intentar construir URL del master
+  if (m.body.includes('#EXTINF') && !m.body.includes('#EXT-X-STREAM-INF')) {
+    try {
+      const url = new URL(m.url);
+      const parts = url.pathname.split('/');
+      // Quitar nombre de archivo y probar patrones comunes
+      const base = parts.slice(0, -1).join('/');
+      m.masterCandidates = [
+        `${url.origin}${base}/master.m3u8`,
+        `${url.origin}${base}/playlist.m3u8`,
+        `${url.origin}${base}/index.m3u8`,
+        `${url.origin}${parts.slice(0, -2).join('/')}/master.m3u8`,
+      ];
+      console.log('[DarkDM] Master candidates:', m.masterCandidates);
+    } catch(e) {}
+  }
+  return m;
 }
 
-async function stopProxyCapture() {
-  if (!proxyActive) return { success: false, error: 'No hay proxy activo' };
+// ============================================================
+// Descargar
+// ============================================================
+async function downloadVideo(manifest, title) {
+  if (!manifest?.url) return { success: false, error: 'Sin URL de manifest' };
 
-  // 1) Limpiar proxy del navegador
+  // Cookies via extension API
+  let cookieStr = '';
   try {
-    await new Promise((resolve) => {
-      chrome.proxy.settings.clear({ scope: 'regular' }, () => resolve());
-    });
-  } catch (e) {}
+    const domain = new URL(manifest.url).hostname;
+    const cookies = await new Promise(resolve => chrome.cookies.getAll({ domain }, resolve));
+    if (cookies?.length) {
+      cookieStr = '# Netscape HTTP Cookie File\n' + cookies.map(c => {
+        const exp = Math.floor(c.expirationDate || 4102444800);
+        const dom = c.domain.startsWith('.') ? c.domain : '.' + c.domain;
+        return `${dom}\tTRUE\t${c.path}\t${c.secure ? 'TRUE' : 'FALSE'}\t${exp}\t${c.name}\t${c.value}`;
+      }).join('\n');
+    }
+  } catch(e) {}
 
-  // 2) Detener el proxy (mata el proceso)
-  const resp = await sn({ type: 'PROXY_STOP' });
-  proxyActive = false;
-
-  return {
-    success: resp?.success !== false,
-    segments: resp?.segments || 0,
-    message: resp?.message || 'Proxy detenido'
-  };
+  return await sn({
+    type: 'DOWNLOAD_MANIFEST',
+    manifest_url: manifest.url,
+    manifest_body: manifest.body || '',
+    cookies: cookieStr,
+    headers: JSON.stringify(manifest.headers || {}),
+    page_url: manifest.pageUrl || '',
+    title: title || 'video',
+    master_candidates: JSON.stringify(manifest.masterCandidates || [])
+  });
 }
 
 // ============================================================
 // Message handler
 // ============================================================
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  const tabId = sender.tab?.id;
+
   switch (msg.type) {
     case 'CONNECTION_STATUS':
       sn({ type: 'PING' }).then(r => sendResponse({ connected: r !== null }));
       return true;
 
-    case 'START_PROXY_CAPTURE':
-      startProxyCapture().then(sendResponse);
-      return true;
-
-    case 'STOP_PROXY_CAPTURE':
-      stopProxyCapture().then(sendResponse);
-      return true;
-
     case 'DOWNLOAD_STREAM':
-      // Fallback: usa yt-dlp directo (para YouTube, etc.)
-      if (!sender?.tab?.id) { sendResponse({ success: false }); return false; }
-      const pageUrl = sender.tab.url || msg.url;
-      sn({
-        type: 'EXTRACT_PAGE',
-        url: pageUrl,
-        title: msg.title || '',
-        hasDrm: false
-      }).then(resp => {
-        const ok = resp && (resp.msg_type === 'DOWNLOAD_STARTED' || resp.msg_type === 'DOWNLOAD_RESULT') && resp.success;
-        sendResponse({ success: !!ok, message: resp?.message, bytes: resp?.bytes });
-      }).catch(() => sendResponse({ success: false, error: 'Host no disponible' }));
+      if (!tabId) { sendResponse({ success: false, error: 'No tab' }); return false; }
+      const manifest = findBestManifest(tabId);
+      if (!manifest) {
+        // Fallback: yt-dlp con URL de la página
+        if (sender?.tab?.url) {
+          downloadVideo({ url: sender.tab.url, body: '' }, msg.title).then(sendResponse);
+        } else {
+          sendResponse({ success: false, error: 'No manifest. Reproduce el video primero.' });
+        }
+        return true;
+      }
+      downloadVideo(manifest, msg.title).then(sendResponse);
       return true;
+
+    case 'ATTACH_DEBUGGER':
+      if (tabId) attachDebugger(tabId);
+      break;
+  }
+});
+
+// Auto-attach en todas las tabs
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'complete') {
+    setTimeout(() => attachDebugger(tabId), 2000);
   }
 });

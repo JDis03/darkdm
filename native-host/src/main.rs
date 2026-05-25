@@ -383,8 +383,11 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                                "--concurrent-fragments", "8",
                                "--impersonate", "chrome-131",
                                "--limit-rate", "50M",
-                               "-f", "bestvideo+bestaudio/best",
+                               "--hls-use-mpegts",
+                               "--hls-prefer-native",
+                               "-f", "bv*+ba/b",
                                "--format-sort", "res:1080,codec:av1:nvdec:hevc:h264,br",
+                               "--merge-output-format", "mp4",
                                &manifest_url]);
                 
                 if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
