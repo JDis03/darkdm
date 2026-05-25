@@ -1,13 +1,14 @@
 // ============================================================
-// DarkDM v6 — Descarga de streams como IDM
-// N1: Direct URL → N2: Manifest Download (como IDM) → N3: Fallbacks
+// DarkDM v7 — Captura de video por Content-Type (bajo nivel)
+// Intercepta cualquier respuesta HTTP con video/* del debugger
 // ============================================================
 (function() {
 'use strict';
-console.log('[DarkDM] v6 loaded');
+console.log('[DarkDM] v7 loaded');
 
 var overlay = null, currentVideo = null, hideTimer = null;
-var downloading = false;
+var capturing = false;
+var statusInterval = null;
 
 // ============================================================
 // Find videos
@@ -47,12 +48,6 @@ function getVideoSource(video) {
     });
   }
   return src;
-}
-
-function isRealVideoUrl(url) {
-  if (!url || url.length < 10) return false;
-  if (url.match(/\.(txt|php|html?|json|xml)(\?|$)/i)) return false;
-  return true;
 }
 
 // ============================================================
@@ -104,59 +99,76 @@ function showStatus(msg, type) {
 function hideStatus() { if (panel) panel.style.display = 'none'; }
 
 // ============================================================
-// CAPTURE — Como IDM
+// CAPTURE — Intercepta respuestas de video del debugger
 // ============================================================
 function doCapture(video) {
-  var src = getVideoSource(video);
-  var title = document.title;
-
+  if (capturing) {
+    // Stop capture
+    stopVideoCapture();
+    return;
+  }
+  
   if (video.paused || video.readyState < 2) {
     showStatus('⏳ Reproduce el video primero');
     return;
   }
-
-  if (downloading) {
-    showStatus('⏳ Ya hay una descarga en curso');
-    return;
-  }
-
-  // N1: URL directa
-  if (src && isRealVideoUrl(src) && !src.includes('.m3u8') && !src.includes('.mpd')) {
+  
+  // Direct URL? Try simple download first
+  var src = getVideoSource(video);
+  if (src && !src.startsWith('blob:') && !src.includes('.m3u8') && !src.includes('.mpd')) {
     showStatus('⬇️ Descargando video directo...');
-    try { chrome.runtime.sendMessage({ type: 'START_DOWNLOAD', url: src, filename: title.substring(0,50) + '.mp4' }); } catch(e) {}
+    try { chrome.runtime.sendMessage({ type: 'START_DOWNLOAD', url: src, filename: document.title.substring(0,50) + '.mp4' }); } catch(e) {}
     return;
   }
+  
+  startVideoCapture();
+}
 
-  // N2: Descarga por manifest (como IDM)
-  showStatus('📡 <b>Iniciando descarga...</b><br><span style="font-size:11px;color:#aaa">Usando manifest .m3u8 detectado</span>');
-  overlay.textContent = '⏳ Descargando...';
-  overlay.style.borderColor = '#2196F3';
-  downloading = true;
-
+function startVideoCapture() {
+  capturing = true;
+  
+  showStatus('📡 <b>Capturando video...</b><br><span style="font-size:11px;color:#aaa">Interceptando respuestas de video</span><br><span style="font-size:10px;color:#4CAF50">Esperando segmentos...</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para DETENER y guardar</span>');
+  
+  overlay.textContent = '⏹️ Parar';
+  overlay.style.borderColor = '#f44336';
+  overlay.style.background = '#c62828';
+  
+  // Start capture in background
   chrome.runtime.sendMessage({
-    type: 'DOWNLOAD_STREAM',
-    title: title.substring(0, 100),
-    url: location.href
-  }, function(resp) {
-    downloading = false;
-    overlay.textContent = '⬇️ DarkDM';
-    overlay.style.borderColor = '#FF6B35';
-    overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(video); };
-
-    if (!resp) {
-      showStatus('❌ No hay respuesta del background', 'error');
-      setTimeout(hideStatus, 4000);
-      return;
+    type: 'START_CAPTURE',
+    title: document.title.substring(0, 100)
+  });
+  
+  // Listen for status updates from background
+  chrome.runtime.onMessage.addListener(function statusListener(msg) {
+    if (msg.type === 'CAPTURE_STATUS') {
+      showStatus('📡 <b>Capturando video...</b><br><span style="font-size:11px;color:#aaa">' + msg.captured + ' segmentos capturados</span><br><span style="font-size:10px;color:#4CAF50">' + msg.pending + ' pendientes</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para guardar</span>');
     }
+  });
+  
+  overlay.onclick = function(e2) {
+    e2.stopPropagation(); e2.preventDefault();
+    stopVideoCapture();
+  };
+}
 
-    if (resp.success) {
-      var size = resp.bytes ? ' (' + (resp.bytes / 1048576).toFixed(0) + 'MB)' : '';
-      showStatus('✅ <b>Descarga completada</b>' + size + '<br><span style="font-size:11px;color:#aaa">' + (resp.message || 'Archivo en ~/Descargas/DarkDM/') + '</span>', 'success');
-      setTimeout(hideStatus, 6000);
+function stopVideoCapture() {
+  capturing = false;
+  
+  showStatus('📦 <b>Uniendo segmentos...</b><br><span style="font-size:11px;color:#aaa">Concatenando con ffmpeg</span>');
+  
+  overlay.textContent = '⬇️ DarkDM';
+  overlay.style.borderColor = '#FF6B35';
+  overlay.style.background = '#1a1a2e';
+  overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(currentVideo); };
+  
+  chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }, function(resp) {
+    if (resp && resp.success) {
+      showStatus('✅ <b>' + resp.segments + ' segmentos unidos</b><br><span style="font-size:11px;color:#aaa">' + (resp.message || 'Archivo en ~/Descargas/DarkDM/') + '</span>', 'success');
     } else {
-      showStatus('❌ <b>Error:</b> ' + (resp.error || resp.msg || 'Desconocido') + '<br><span style="font-size:10px;color:#aaa;display:block;margin-top:4px">Asegúrate de que el video se esté reproduciendo</span>', 'error');
-      setTimeout(hideStatus, 6000);
+      showStatus('❌ Error: ' + (resp?.error || 'desconocido'), 'error');
     }
+    setTimeout(hideStatus, 8000);
   });
 }
 
@@ -184,7 +196,7 @@ document.addEventListener('mousemove', function(e) {
   }, 150);
 });
 
-// Auto-attach debugger
+// Auto-attach debugger to every tab with video
 setInterval(function() {
   var v = findBestVideo();
   if (v && !v.dataset.ddmReady) {
