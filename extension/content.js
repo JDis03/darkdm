@@ -88,15 +88,22 @@ function toggleProxy() {
 }
 
 function startProxy() {
-  showStatus('🔄 <b>Iniciando proxy...</b>');
+  var pass = prompt('🔒 Contraseña sudo para iptables\n(redirige solo tráfico HTTP del video al proxy):');
+  if (!pass) {
+    showStatus('❌ Cancelado', 'error');
+    setTimeout(hideStatus, 2000);
+    return;
+  }
+
+  showStatus('🔄 <b>Iniciando proxy + iptables...</b>');
   overlay.textContent = '⏳...';
   overlay.style.borderColor = '#FF9800';
   overlay.style.background = '#e65100';
 
-  chrome.runtime.sendMessage({ type: 'START_PROXY' }, function(resp) {
+  chrome.runtime.sendMessage({ type: 'START_PROXY', password: pass, domain: location.hostname }, function(resp) {
     if (resp && resp.success) {
       proxyRunning = true;
-      showStatus('🔴 <b>Proxy activo</b><br><span style="font-size:11px;color:#aaa">Capturando tráfico HTTP en :8899</span><br><span style="font-size:10px;color:#aaa">Recarga la página si es necesario</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para PARAR y guardar</span>');
+      showStatus('🔴 <b>Proxy + iptables activo</b><br><span style="font-size:11px;color:#aaa">Solo tráfico HTTP del sitio capturado</span><br><span style="font-size:10px;color:#aaa">Recarga la página para que fluya por el proxy</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para PARAR y guardar</span>');
       overlay.textContent = '⏹️ Parar';
       overlay.style.borderColor = '#f44336';
       overlay.style.background = '#c62828';

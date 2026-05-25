@@ -19,12 +19,16 @@ function sn(msg) {
 // ============================================================
 // Proxy control
 // ============================================================
-async function startProxy() {
+async function startProxy(password, domain) {
   if (proxyActive) return { success: false, error: 'Ya activo' };
-  const resp = await sn({ type: 'PROXY_START' });
+  const resp = await sn({
+    type: 'PROXY_START',
+    sudo_password: password || '',
+    target_domain: domain || ''
+  });
   if (resp?.success) {
     proxyActive = true;
-    return { success: true, message: 'Proxy en puerto 8899' };
+    return { success: true, message: 'Proxy + iptables activo' };
   }
   return { success: false, error: resp?.error || 'Error al iniciar proxy' };
 }
@@ -46,7 +50,7 @@ async function stopProxy() {
 chrome.runtime.onMessage.addListener((msg, _, sendResponse) => {
   switch (msg.type) {
     case 'START_PROXY':
-      startProxy().then(sendResponse);
+      startProxy(msg.password, msg.domain).then(sendResponse);
       return true;
     case 'STOP_PROXY':
       stopProxy().then(sendResponse);
