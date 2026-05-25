@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "DarkDM - Video Download Manager",
+  "version": "1.0.0",
+  "description": "Download videos from streaming sites. Capture video buffer directly from your browser.",
+  "author": "DarkDM",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": [
+    "nativeMessaging",
+    "contextMenus",
+    "notifications",
+    "storage",
+    "downloads",
+    "activeTab",
+    "scripting",
+    "debugger"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "DarkDM"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/*"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
+    }
+  ]
+}

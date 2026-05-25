@@ -1,0 +1,25 @@
+# Rust
+native-host/target/
+src-tauri/target/
+
+# Dependencies
+node_modules/
+
+# Build
+src-tauri/target/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Local config
+.env
+*.local
+
+# Temp test files
+/tmp/

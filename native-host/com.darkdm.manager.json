@@ -1,0 +1,7 @@
+{
+  "name": "com.darkdm.manager",
+  "description": "DarkDM Native Messaging Host - Video Download Manager",
+  "path": "/home/dark/.local/bin/darkdm-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://lghgegmbhoinnmcbaipdcieenakfocen/"]
+}

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="url(#bg)"/>
+  <!-- Download arrow -->
+  <g transform="translate(64,58)" fill="none" stroke="#FF6B35" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M-30,30 L30,30"/>
+    <polyline points="-15,5 0,25 15,5"/>
+    <line x1="0" y1="25" x2="0" y2="-30"/>
+  </g>
+  <!-- Video play icon -->
+  <g transform="translate(64,80)">
+    <circle r="18" fill="none" stroke="#4CAF50" stroke-width="2.5"/>
+    <polygon points="-6,-4 -6,8 8,2" fill="#4CAF50"/>
+  </g>
+</svg>
