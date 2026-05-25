@@ -26,6 +26,10 @@ struct ChromeMessage {
     page_url: Option<String>,
     page_title: Option<String>,
     cookies: Option<String>,        // Netscape cookie string from extension
+    manifest_url: Option<String>,   // URL of .m3u8/.mpd manifest
+    manifest_body: Option<String>,  // Content of the manifest
+    headers: Option<String>,        // JSON string of request headers
+    title: Option<String>,          // Video title
     #[serde(flatten)]
     extra: std::collections::HashMap<String, serde_json::Value>,
 }
@@ -224,13 +228,240 @@ fn handle_message(msg: &ChromeMessage) -> Response {
         },
 
         // ============================================================
+        // DOWNLOAD MANIFEST - Descarga via manifest .m3u8 (como IDM)
+        // Extension captura el manifest + cookies + headers del browser
+        // Native host descarga todo independientemente del reproductor
+        // ============================================================
+        "DOWNLOAD_MANIFEST" => {
+            let manifest_url = match &msg.manifest_url {
+                Some(u) => u.clone(),
+                None => return error_response("No manifest URL"),
+            };
+            let manifest_body = msg.manifest_body.as_deref().unwrap_or("");
+            let cookies = msg.cookies.as_deref().unwrap_or("");
+            let headers_json = msg.headers.as_deref().unwrap_or("{}");
+            let title = msg.title.as_deref().unwrap_or("video");
+            
+            eprintln!("[DarkDM] DOWNLOAD_MANIFEST: {} (body: {} bytes)", manifest_url, manifest_body.len());
+            
+            // Sanitize title for filename
+            let safe_title: String = title.chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
+                .collect::<String>()
+                .trim()
+                .chars().take(80).collect();
+            let filename = if safe_title.is_empty() { "darkdm_video".to_string() } else { safe_title };
+            
+            let output_path = output_dir.join(format!("{}.mp4", filename));
+            let output_str = output_path.to_string_lossy().to_string();
+            
+            // Write cookies to temp file if provided
+            let cookies_path = output_dir.join("_darkdm_cookies.txt");
+            if !cookies.is_empty() {
+                let _ = std::fs::write(&cookies_path, cookies);
+            }
+            
+            // Try ffmpeg with proper headers + cookies
+            if which("ffmpeg") {
+                eprintln!("[DarkDM] ffmpeg download from manifest");
+                
+                let mut ffmpeg_cmd = Command::new("ffmpeg");
+                ffmpeg_cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
+                
+                // Add cookies if available
+                if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+                    ffmpeg_cmd.args(["-cookies", &cookies_path.to_string_lossy()]);
+                }
+                
+                // Add custom headers (User-Agent, Referer, etc.)
+                if let Ok(headers_map) = serde_json::from_str::<std::collections::HashMap<String, String>>(headers_json) {
+                    for (k, v) in &headers_map {
+                        if k.eq_ignore_ascii_case("user-agent") || k.eq_ignore_ascii_case("referer") {
+                            ffmpeg_cmd.args(["-headers", &format!("{}: {}\r\n", k, v)]);
+                        }
+                    }
+                } else {
+                    // Fallback User-Agent
+                    ffmpeg_cmd.args(["-user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"]);
+                }
+                
+                // Input from manifest URL
+                ffmpeg_cmd.args(["-i", &manifest_url]);
+                ffmpeg_cmd.args(["-c", "copy", "-movflags", "+faststart", &output_str]);
+                
+                eprintln!("[DarkDM] Running ffmpeg...");
+                let start = std::time::Instant::now();
+                let status = ffmpeg_cmd
+                    .stdout(Stdio::null()).stderr(Stdio::null())
+                    .status();
+                
+                match status {
+                    Ok(s) if s.success() => {
+                        let elapsed = start.elapsed();
+                        let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                        eprintln!("[DarkDM] ffmpeg OK: {} bytes in {:?}", size, elapsed);
+                        // Cleanup temp cookies
+                        let _ = std::fs::remove_file(&cookies_path);
+                        return ok_response(&format!("Downloaded: {} bytes in {:?}", size, elapsed), &output_str, size);
+                    },
+                    _ => {
+                        eprintln!("[DarkDM] ffmpeg failed, trying yt-dlp");
+                    }
+                }
+            }
+            
+            // Fallback: yt-dlp
+            if which("yt-dlp") {
+                eprintln!("[DarkDM] yt-dlp download from manifest");
+                let ytdlp_path = find_binary("yt-dlp").unwrap_or_else(|| "yt-dlp".to_string());
+                
+                let mut ytdlp_cmd = Command::new(&ytdlp_path);
+                ytdlp_cmd.args(["-o", &output_str, "--no-playlist", "--concurrent-fragments", "8",
+                               "--impersonate", "chrome-131", &manifest_url]);
+                
+                if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+                    ytdlp_cmd.args(["--cookies", &cookies_path.to_string_lossy()]);
+                }
+                
+                let status = ytdlp_cmd
+                    .stdout(Stdio::null()).stderr(Stdio::null())
+                    .status();
+                
+                let _ = std::fs::remove_file(&cookies_path);
+                
+                match status {
+                    Ok(s) if s.success() => {
+                        let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                        return ok_response(&format!("Downloaded via yt-dlp: {} bytes", size), &output_str, size);
+                    },
+                    _ => {
+                        return error_response("Both ffmpeg and yt-dlp failed. The manifest might be protected or segments are encrypted.");
+                    }
+                }
+            }
+            
+            let _ = std::fs::remove_file(&cookies_path);
+            error_response("No download tool available (need ffmpeg or yt-dlp)")
+        },
+
+        // ============================================================
+        // SEGMENT DATA - Recibe un segmento .ts desde la extension
+        // (interceptado via debugger Network.getResponseBody)
+        // ============================================================
+        "SEGMENT_DATA" => {
+            let session = msg.extra.get("session").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let seq = msg.extra.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
+            let data = msg.extra.get("data").and_then(|v| v.as_str()).unwrap_or("");
+            
+            eprintln!("[DarkDM] Segment: session={} seq={} len={}", session, seq, data.len());
+            
+            if data.is_empty() {
+                return error_response("Empty segment data");
+            }
+            
+            // Decode base64 and write to temp file
+            let seg_dir = output_dir.join("_segments").join(session);
+            std::fs::create_dir_all(&seg_dir).unwrap_or_default();
+            let seg_path = seg_dir.join(format!("{:05}.ts", seq));
+            
+            use base64::Engine as _;
+            let engine = base64::engine::general_purpose::STANDARD;
+            if let Ok(bytes) = engine.decode(data) {
+                if std::fs::write(&seg_path, &bytes).is_ok() {
+                    eprintln!("[DarkDM] Saved segment {} -> {} ({} bytes)", seq, seg_path.display(), bytes.len());
+                    Response {
+                        msg_type: "SEGMENT_SAVED".to_string(),
+                        success: Some(true), error: None,
+                        message: Some(format!("Segment {} saved", seq)),
+                        progress: Some(seq as f64),
+                        filename: Some(seg_path.to_string_lossy().to_string()),
+                        segments: None, bytes: Some(bytes.len() as u64),
+                    }
+                } else {
+                    error_response(&format!("Failed to write segment {}", seq))
+                }
+            } else {
+                error_response("Failed to decode base64 segment data")
+            }
+        },
+
+        // ============================================================
+        // CONCATENATE SEGMENTS - Une todos los segmentos .ts en .mp4
+        // ============================================================
+        "CONCATENATE_SEGMENTS" => {
+            let session = msg.extra.get("session").and_then(|v| v.as_str()).unwrap_or("");
+            let count = msg.extra.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+            let title = msg.extra.get("title").and_then(|v| v.as_str()).unwrap_or("video");
+            
+            if session.is_empty() || count == 0 {
+                return error_response("No session or count specified");
+            }
+            
+            let seg_dir = output_dir.join("_segments").join(session);
+            let output_path = output_dir.join(format!("{}.mp4", 
+                title.chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '_' || *c == '-').collect::<String>().trim()));
+            let output_str = output_path.to_string_lossy().to_string();
+            
+            eprintln!("[DarkDM] Concatenating {} segments -> {}", count, output_str);
+            
+            // Method 1: ffmpeg concat demuxer (fastest, no re-encode)
+            if which("ffmpeg") {
+                // Create concat file
+                let concat_path = seg_dir.join("_concat.txt");
+                let concat_content: String = (0..count)
+                    .map(|i| format!("file '{:05}.ts'\n", i))
+                    .collect();
+                std::fs::write(&concat_path, &concat_content).unwrap_or_default();
+                
+                let status = Command::new("ffmpeg")
+                    .args([
+                        "-y", "-f", "concat", "-safe", "0",
+                        "-i", &concat_path.to_string_lossy(),
+                        "-c", "copy", "-movflags", "+faststart",
+                        &output_str
+                    ])
+                    .stdout(Stdio::null()).stderr(Stdio::null())
+                    .status();
+                
+                // Cleanup temp segments
+                let _ = std::fs::remove_dir_all(&seg_dir);
+                
+                match status {
+                    Ok(s) if s.success() => {
+                        let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                        ok_response(&format!("Concatenated {} segments: {} bytes", count, size), &output_str, size)
+                    },
+                    _ => error_response("ffmpeg concat failed. Segments preserved in temp dir.")
+                }
+            } else {
+                // Method 2: simple cat (works for MPEG-TS)
+                eprintln!("[DarkDM] No ffmpeg, using cat for concatenation");
+                let mut all_data: Vec<u8> = Vec::new();
+                for i in 0..count {
+                    let seg_path = seg_dir.join(format!("{:05}.ts", i));
+                    if let Ok(data) = std::fs::read(&seg_path) {
+                        all_data.extend_from_slice(&data);
+                    }
+                }
+                if !all_data.is_empty() {
+                    std::fs::write(&output_path, &all_data).unwrap_or_default();
+                    let _ = std::fs::remove_dir_all(&seg_dir);
+                    let size = all_data.len() as u64;
+                    ok_response(&format!("Catted {} segments: {} bytes", count, size), &output_str, size)
+                } else {
+                    error_response("No segment data to concatenate")
+                }
+            }
+        },
+
+        // ============================================================
         // PING - Health check
         // ============================================================
         "PING" => Response {
             msg_type: "PONG".to_string(),
             success: Some(true),
             error: None,
-            message: Some(format!("DarkDM Native Host v1.0.0 (HLS+DASH+Direct)")),
+            message: Some(format!("DarkDM Native Host v1.0.0 (HLS+DASH+Direct+SegmentCapture)")),
             progress: None, filename: None,
             segments: None, bytes: None,
         },
