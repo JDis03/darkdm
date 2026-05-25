@@ -41,7 +41,13 @@ async function attachDebugger(tabId) {
       // Intercept manifest requests
       if (method === 'Network.requestWillBeSent') {
         const url = params.request?.url || '';
-        if (url.match(/\.(m3u8|mpd)(\?|$)/i)) {
+        const ct = params.request?.headers?.['Accept'] || '';
+        // Detect manifests by URL pattern (.m3u8/.mpd anywhere) OR by Accept header
+        // Some sites hide the extension (e.g., /get.php?id=m3u8)
+        if (url.match(/\.(m3u8|mpd)(\?|$)/i) || 
+            url.includes('.m3u8') || url.includes('.mpd') ||
+            ct.includes('mpegurl') || ct.includes('dash+xml') ||
+            url.match(/playlist|manifest|master\.m3u/i)) {
           const entry = {
             url: url,
             headers: params.request?.headers || {},
@@ -121,9 +127,23 @@ function cookiesToNetscape(cookies) {
 }
 
 // ============================================================
+// Helper: extract cookies for a URL
+// ============================================================
+async function extractCookies(pageUrl) {
+  try {
+    const domain = new URL(pageUrl).hostname;
+    const cookies = await new Promise(resolve => {
+      chrome.cookies.getAll({ domain }, resolve);
+    });
+    if (cookies?.length) return cookiesToNetscape(cookies);
+  } catch(e) {}
+  return '';
+}
+
+// ============================================================
 // DOWNLOAD STREAM — como IDM
 // ============================================================
-async function downloadStream(tabId, title) {
+async function downloadStream(tabId, title, sender) {
   if (!tabId) return { success: false, error: 'No tab' };
 
   // 1) Get manifest from cache — prefer master (has #EXT-X-STREAM-INF) over variant
@@ -137,7 +157,18 @@ async function downloadStream(tabId, title) {
   }
   
   if (!manifest || !manifest.body) {
-    return { success: false, error: 'No manifest detected. Make sure video is playing and debugger is attached.' };
+    // Fallback: try yt-dlp on the page URL directly (works for YouTube, etc.)
+    console.log('[DarkDM] No manifest captured, trying yt-dlp on page URL');
+    if (sender?.tab?.url) {
+      const pageUrl = sender.tab.url;
+      const cookies = await extractCookies(pageUrl);
+      const resp = await sn({
+        type: 'EXTRACT_PAGE', url: pageUrl, hasDrm: false, cookies: cookies,
+        title: title || ''
+      });
+      if (resp?.success) return resp;
+    }
+    return { success: false, error: 'No se detectó manifest .m3u8. Asegúrate de que el video se esté reproduciendo y el debugger esté conectado.' };
   }
 
   // 2) Extract cookies for the domain
@@ -222,7 +253,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case 'DOWNLOAD_STREAM':
       if (!tabId) { sendResponse({ success: false, error: 'No tab' }); return false; }
-      downloadStream(tabId, msg.title).then(sendResponse);
+      downloadStream(tabId, msg.title, sender).then(sendResponse);
       return true;
 
     case 'ATTACH_DEBUGGER':

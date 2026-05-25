@@ -135,7 +135,8 @@ function doCapture(video) {
 
   chrome.runtime.sendMessage({
     type: 'DOWNLOAD_STREAM',
-    title: title.substring(0, 100)
+    title: title.substring(0, 100),
+    url: location.href
   }, function(resp) {
     downloading = false;
     overlay.textContent = '⬇️ DarkDM';
