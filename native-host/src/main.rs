@@ -602,22 +602,16 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             let sudo_pass = msg.extra.get("sudo_password").and_then(|v| v.as_str()).unwrap_or("");
             let target_domain = msg.extra.get("target_domain").and_then(|v| v.as_str()).unwrap_or("");
             
-            // Find the proxy binary: same directory as current exe, or PATH, or default
-            let proxy_path = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("darkdm-proxy")))
-                .filter(|p| p.exists())
-                .map(|p| p.to_string_lossy().to_string())
-                .or_else(|| find_binary("darkdm-proxy"))
-                .unwrap_or_else(|| {
-                    // Default: look in ~/.local/bin/
+            // Find the proxy binary: darkdm-mitm (mitmproxy) or fallback to darkdm-proxy
+            let proxy_path = find_binary("darkdm-mitm")
+                .or_else(|| {
                     let home = std::env::var("HOME").unwrap_or_default();
-                    let fallback = format!("{}/.local/bin/darkdm-proxy", home);
-                    if Path::new(&fallback).exists() { fallback }
-                    else { "darkdm-proxy".to_string() }
-                });
+                    let fallback = format!("{}/.local/bin/darkdm-mitm", home);
+                    if Path::new(&fallback).exists() { Some(fallback) } else { None }
+                })
+                .unwrap_or_else(|| "darkdm-mitm".to_string());
             
-            eprintln!("[DarkDM] Starting proxy: {} {} {} {}", proxy_path, session, output_str, port_str);
+            eprintln!("[DarkDM] Starting proxy: {} {}", proxy_path, port_str);
             
             // Store sudo password for cleanup later
             if !sudo_pass.is_empty() {
@@ -626,9 +620,9 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 }
             }
             
-            // Start the proxy
+            // Start the proxy (darkdm-mitm uses "start" subcommand)
             let child_result = Command::new(&proxy_path)
-                .args([&session, &output_str, &port_str])
+                .args(["start"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn();
@@ -676,47 +670,38 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 d.clear();
             }
             
-            // Kill proxy process
-            let proxy_pid = if let Ok(mut p) = PROXY_PROCESS.lock() {
+            // Stop mitmproxy via the management script
+            let _ = Command::new("darkdm-mitm")
+                .args(["stop"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            
+            // Also kill the child process if we had one
+            if let Ok(mut p) = PROXY_PROCESS.lock() {
                 if let Some(mut child) = p.take() {
-                    let pid = child.id();
                     let _ = child.kill();
                     let _ = child.wait();
-                    Some(pid)
-                } else {
-                    None
                 }
-            } else {
-                None
-            };
+            }
             
-            if let Some(pid) = proxy_pid {
-                eprintln!("[DarkDM] Proxy (PID {}) killed, iptables cleaned", pid);
-                let seg_dir = output_dir.join("_proxy_segments");
-                let mut total_segs = 0u64;
-                if let Ok(entries) = std::fs::read_dir(&seg_dir) {
-                    for entry in entries.flatten() {
-                        if entry.path().extension().map_or(false, |e| e == "ts" || e == "m3u8" || e == "mp4") {
-                            total_segs += 1;
-                        }
+            // Count segments and return
+            let seg_dir = output_dir.join("_proxy_segments");
+            let mut total_segs = 0u64;
+            if let Ok(entries) = std::fs::read_dir(&seg_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().extension().map_or(false, |e| e == "ts" || e == "m3u8" || e == "mp4") {
+                        total_segs += 1;
                     }
                 }
-                Response {
-                    msg_type: "PROXY_STOPPED".to_string(),
-                    success: Some(true), error: None,
-                    message: Some(format!("Proxy stopped. {} segments captured", total_segs)),
-                    progress: None, filename: None,
-                    segments: Some(total_segs as usize), bytes: None,
-                }
-            } else {
-                // Even if no proxy, still report success since iptables was cleaned
-                Response {
-                    msg_type: "PROXY_STOPPED".to_string(),
-                    success: Some(true), error: None,
-                    message: Some("Proxy cleaned up".to_string()),
-                    progress: None, filename: None,
-                    segments: None, bytes: None,
-                }
+            }
+            eprintln!("[DarkDM] Proxy stopped. {} segments captured", total_segs);
+            Response {
+                msg_type: "PROXY_STOPPED".to_string(),
+                success: Some(true), error: None,
+                message: Some(format!("Proxy stopped. {} segments captured", total_segs)),
+                progress: None, filename: None,
+                segments: Some(total_segs as usize), bytes: None,
             }
         },
 
