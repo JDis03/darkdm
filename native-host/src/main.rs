@@ -599,24 +599,6 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             let port_str = "8899".to_string();
             let output_str = output_dir.to_string_lossy().to_string();
             
-            // Set system proxy via gsettings (GNOME) o env vars
-            let _ = Command::new("gsettings")
-                .args(["set", "org.gnome.system.proxy", "mode", "manual"])
-                .stdout(Stdio::null()).stderr(Stdio::null()).status();
-            let _ = Command::new("gsettings")
-                .args(["set", "org.gnome.system.proxy.http", "host", "127.0.0.1"])
-                .stdout(Stdio::null()).stderr(Stdio::null()).status();
-            let _ = Command::new("gsettings")
-                .args(["set", "org.gnome.system.proxy.http", "port", "8899"])
-                .stdout(Stdio::null()).stderr(Stdio::null()).status();
-            // Also try KDE
-            let _ = Command::new("kwriteconfig5")
-                .args(["--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "1"])
-                .stdout(Stdio::null()).stderr(Stdio::null()).status();
-            let _ = Command::new("kwriteconfig5")
-                .args(["--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpProxy", "http://127.0.0.1:8899"])
-                .stdout(Stdio::null()).stderr(Stdio::null()).status();
-            
             let sudo_pass = msg.extra.get("sudo_password").and_then(|v| v.as_str()).unwrap_or("");
             let target_domain = msg.extra.get("target_domain").and_then(|v| v.as_str()).unwrap_or("");
             
@@ -684,11 +666,6 @@ fn handle_message(msg: &ChromeMessage) -> Response {
         // PROXY STOP - Detiene proxy, limpia iptables, concatena
         // ============================================================
         "PROXY_STOP" => {
-            // Clear system proxy
-            let _ = Command::new("gsettings")
-                .args(["set", "org.gnome.system.proxy", "mode", "none"])
-                .stdout(Stdio::null()).stderr(Stdio::null()).status();
-            
             // Remove iptables rules
             if let Ok(domains) = IPTABLES_DOMAINS.lock() {
                 for domain in domains.iter() {
