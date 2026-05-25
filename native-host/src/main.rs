@@ -322,12 +322,29 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             let mut use_url = manifest_url.clone();
             
             if is_variant && !master_candidates.is_empty() {
-                eprintln!("[DarkDM] Variant manifest detected, trying {} master candidates", master_candidates.len());
+                eprintln!("[DarkDM] Variant detected, trying {} master candidates", master_candidates.len());
+                
+                // Extract cookies from Netscape format for the candidate test
+                let cookie_header = cookies.lines()
+                    .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+                    .filter_map(|l| l.split('\t').nth(5))
+                    .zip(cookies.lines()
+                        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+                        .filter_map(|l| l.split('\t').nth(6)))
+                    .map(|(n, v)| format!("{}={}", n, v))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                
                 for candidate in &master_candidates {
-                    if let Ok(mut resp) = ureq::get(candidate)
+                    let mut req = ureq::get(candidate)
                         .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-                        .call() 
-                    {
+                        .header("Referer", &manifest_url);
+                    
+                    if !cookie_header.is_empty() {
+                        req = req.header("Cookie", &cookie_header);
+                    }
+                    
+                    if let Ok(mut resp) = req.call() {
                         if let Ok(body) = resp.body_mut().read_to_string() {
                             if body.contains("#EXT-X-STREAM-INF") {
                                 eprintln!("[DarkDM] Found master manifest: {}", candidate);

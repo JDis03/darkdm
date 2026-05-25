@@ -1,32 +1,13 @@
 // ============================================================
-// DarkDM — ISOLATED World (UI + relay a background)
+// DarkDM — Solo proxy (tú configuras el proxy en Vivaldi)
 // ============================================================
 (function() {
 'use strict';
-console.log('[DarkDM] ISOLATED loaded');
+console.log('[DarkDM] Proxy-only loaded');
 
 var overlay = null, currentVideo = null, hideTimer = null;
-var downloading = false;
+var proxyRunning = false;
 
-// ============================================================
-// Escuchar manifests desde MAIN world via CustomEvent
-// ============================================================
-document.addEventListener('__ddm_manifest', function(e) {
-  const { url, body, headers } = e.detail;
-  console.log('[DarkDM] Manifest from MAIN:', url.substring(0, 80));
-
-  // Reenviar a background con cookies de extension API
-  chrome.runtime.sendMessage({
-    type: 'MANIFEST_FOUND',
-    url: url,
-    body: body,
-    headers: headers
-  }).catch(() => {});
-});
-
-// ============================================================
-// Find videos
-// ============================================================
 function findAllVideos(root) {
   root = root || document;
   var vids = [];
@@ -53,16 +34,13 @@ function findBestVideo() {
   return best || vids[0];
 }
 
-// ============================================================
-// OVERLAY
-// ============================================================
 function createOverlay(v) {
   removeOverlay();
   var el = document.createElement('div');
   el.id = 'ddm-overlay';
   el.textContent = '⬇️ DarkDM';
   el.style.cssText = 'position:fixed;z-index:99999999;display:flex;align-items:center;gap:5px;padding:5px 10px;background:#1a1a2e;color:#fff;border:1px solid #FF6B35;border-radius:6px;font:600 11px sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.5);pointer-events:auto';
-  el.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(v); };
+  el.onclick = function(e) { e.stopPropagation(); e.preventDefault(); toggleProxy(); };
   document.body.appendChild(el);
   overlay = el; currentVideo = v;
   positionOverlay(v);
@@ -84,9 +62,6 @@ function removeOverlay() {
   currentVideo = null;
 }
 
-// ============================================================
-// STATUS PANEL
-// ============================================================
 var panel = null;
 function showStatus(msg, type) {
   if (!panel) {
@@ -102,43 +77,54 @@ function showStatus(msg, type) {
 function hideStatus() { if (panel) panel.style.display = 'none'; }
 
 // ============================================================
-// CAPTURE
+// PROXY
 // ============================================================
-function doCapture(video) {
-  if (downloading) {
-    showStatus('⏳ Ya descargando...');
-    return;
+function toggleProxy() {
+  if (proxyRunning) {
+    stopProxy();
+  } else {
+    startProxy();
   }
+}
 
-  if (video.paused || video.readyState < 2) {
-    showStatus('⏳ Reproduce el video primero');
-    return;
-  }
-
-  downloading = true;
-  showStatus('📡 <b>Descargando...</b><br><span style="font-size:11px;color:#aaa">Usando manifest + yt-dlp</span>');
-
+function startProxy() {
+  showStatus('🔄 <b>Iniciando proxy...</b>');
   overlay.textContent = '⏳...';
-  overlay.style.borderColor = '#2196F3';
+  overlay.style.borderColor = '#FF9800';
+  overlay.style.background = '#e65100';
 
-  chrome.runtime.sendMessage({
-    type: 'DOWNLOAD_STREAM',
-    title: document.title.substring(0, 100)
-  }, function(resp) {
-    downloading = false;
-    overlay.textContent = '⬇️ DarkDM';
-    overlay.style.borderColor = '#FF6B35';
-    overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(video); };
-
-    if (!resp) {
-      showStatus('❌ Sin respuesta del background', 'error');
-    } else if (resp.success) {
-      var size = resp.bytes ? ' (' + (resp.bytes/1048576).toFixed(0) + 'MB)' : '';
-      showStatus('✅ <b>Descarga completa</b>' + size + '<br><span style="font-size:11px;color:#aaa">' + (resp.message || '') + '</span>', 'success');
+  chrome.runtime.sendMessage({ type: 'START_PROXY' }, function(resp) {
+    if (resp && resp.success) {
+      proxyRunning = true;
+      showStatus('🔴 <b>Proxy activo</b><br><span style="font-size:11px;color:#aaa">Capturando tráfico HTTP en :8899</span><br><span style="font-size:10px;color:#aaa">Recarga la página si es necesario</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para PARAR y guardar</span>');
+      overlay.textContent = '⏹️ Parar';
+      overlay.style.borderColor = '#f44336';
+      overlay.style.background = '#c62828';
     } else {
-      showStatus('❌ ' + (resp.error || resp.msg || 'Error'), 'error');
+      showStatus('❌ Error: ' + (resp?.error || 'no se pudo iniciar'), 'error');
+      overlay.textContent = '⬇️ DarkDM';
+      overlay.style.borderColor = '#FF6B35';
+      overlay.style.background = '#1a1a2e';
+      setTimeout(hideStatus, 4000);
     }
-    setTimeout(hideStatus, 8000);
+  });
+}
+
+function stopProxy() {
+  proxyRunning = false;
+  showStatus('📦 <b>Deteniendo proxy...</b><br><span style="font-size:11px;color:#aaa">Concatenando segmentos</span>');
+  overlay.textContent = '⬇️ DarkDM';
+  overlay.style.borderColor = '#FF6B35';
+  overlay.style.background = '#1a1a2e';
+  overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); toggleProxy(); };
+
+  chrome.runtime.sendMessage({ type: 'STOP_PROXY' }, function(resp) {
+    if (resp && resp.success) {
+      showStatus('✅ <b>' + resp.segments + ' segmentos capturados</b><br><span style="font-size:11px;color:#aaa">Revisa ~/Descargas/DarkDM/</span>', 'success');
+    } else {
+      showStatus('⚠️ ' + (resp?.error || 'Error'), 'error');
+    }
+    setTimeout(hideStatus, 6000);
   });
 }
 
@@ -165,5 +151,14 @@ document.addEventListener('mousemove', function(e) {
     } catch(err) {}
   }, 150);
 });
+
+// Auto-init
+setInterval(function() {
+  var v = findBestVideo();
+  if (v && !v.dataset.ddmReady) {
+    v.dataset.ddmReady = '1';
+    console.log('[DarkDM] Ready');
+  }
+}, 2000);
 
 })();
