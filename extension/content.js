@@ -1,12 +1,12 @@
 // ============================================================
-// DarkDM v6 — Captura de manifest + yt-dlp (como IDM)
+// DarkDM v9 — Proxy mode (proceso independiente, como IDM)
 // ============================================================
 (function() {
 'use strict';
-console.log('[DarkDM] v6 loaded');
+console.log('[DarkDM] v9 loaded');
 
 var overlay = null, currentVideo = null, hideTimer = null;
-var downloading = false;
+var capturing = false;
 
 function findAllVideos(root) {
   root = root || document;
@@ -32,17 +32,6 @@ function findBestVideo() {
     } catch(e) {}
   });
   return best || vids[0];
-}
-
-function getVideoSource(video) {
-  var src = video.currentSrc || video.src || '';
-  if (src.startsWith('blob:')) src = '';
-  if (!src) {
-    video.querySelectorAll('source').forEach(function(s) {
-      if (s.src && !s.src.startsWith('blob:')) src = s.src;
-    });
-  }
-  return src;
 }
 
 function createOverlay(v) {
@@ -91,60 +80,90 @@ function hideStatus() { if (panel) panel.style.display = 'none'; }
 // CAPTURE
 // ============================================================
 function doCapture(video) {
-  var src = getVideoSource(video);
-  var title = document.title;
+  if (capturing) {
+    stopCapture();
+    return;
+  }
 
   if (video.paused || video.readyState < 2) {
     showStatus('⏳ Reproduce el video primero');
     return;
   }
 
-  if (downloading) {
-    showStatus('⏳ Ya hay una descarga en curso');
+  // YouTube / sitios sin proteccion: yt-dlp directo
+  var hostname = location.hostname.toLowerCase();
+  if (hostname.includes('youtube') || hostname.includes('youtu.be') || 
+      hostname.includes('vimeo') || hostname.includes('dailymotion')) {
+    showStatus('📡 <b>Iniciando descarga...</b><br><span style="font-size:11px;color:#aaa">Usando yt-dlp</span>');
+    overlay.textContent = '⏳...';
+    overlay.style.borderColor = '#2196F3';
+    chrome.runtime.sendMessage({
+      type: 'DOWNLOAD_STREAM',
+      title: document.title.substring(0, 100),
+      url: location.href
+    }, function(resp) {
+      overlay.textContent = '⬇️ DarkDM';
+      overlay.style.borderColor = '#FF6B35';
+      if (resp && resp.success) {
+        var s = resp.bytes ? ' (' + (resp.bytes/1048576).toFixed(0) + 'MB)' : '';
+        showStatus('✅ <b>Descarga completa</b>' + s, 'success');
+      } else {
+        showStatus('❌ Error: ' + ((resp && (resp.error||resp.msg)) || 'desconocido'), 'error');
+      }
+      setTimeout(hideStatus, 5000);
+    });
     return;
   }
 
-  // URL directa
-  if (src && !src.startsWith('blob:') && !src.includes('.m3u8') && !src.includes('.mpd')) {
-    showStatus('⬇️ Descargando video directo...');
-    try { chrome.runtime.sendMessage({ type: 'START_DOWNLOAD', url: src, filename: title.substring(0,50) + '.mp4' }); } catch(e) {}
-    return;
-  }
+  // Movie sites / sitios con proteccion: proxy
+  startCapture();
+}
 
-  // Descargar via manifest + yt-dlp (como IDM)
-  showStatus('📡 <b>Iniciando descarga...</b><br><span style="font-size:11px;color:#aaa">Detectando manifest .m3u8</span>');
+function startCapture() {
+  capturing = true;
+  showStatus('🔄 <b>Iniciando proxy...</b><br><span style="font-size:11px;color:#aaa">Capturando tráfico de video</span>');
   overlay.textContent = '⏳...';
-  overlay.style.borderColor = '#2196F3';
-  downloading = true;
+  overlay.style.borderColor = '#FF9800';
+  overlay.style.background = '#e65100';
 
-  chrome.runtime.sendMessage({
-    type: 'DOWNLOAD_STREAM',
-    title: title.substring(0, 100),
-    url: location.href
-  }, function(resp) {
-    downloading = false;
-    overlay.textContent = '⬇️ DarkDM';
-    overlay.style.borderColor = '#FF6B35';
-    overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(video); };
-
-    if (!resp) {
-      showStatus('❌ No hay respuesta del background', 'error');
-      setTimeout(hideStatus, 4000);
-      return;
-    }
-
-    if (resp.success) {
-      var size = resp.bytes ? ' (' + (resp.bytes / 1048576).toFixed(0) + 'MB)' : '';
-      showStatus('✅ <b>Descarga completada</b>' + size + '<br><span style="font-size:11px;color:#aaa">' + (resp.message || 'Archivo en ~/Descargas/DarkDM/') + '</span>', 'success');
-      setTimeout(hideStatus, 6000);
+  chrome.runtime.sendMessage({ type: 'START_PROXY_CAPTURE' }, function(resp) {
+    if (resp && resp.success) {
+      showStatus('🔴 <b>Proxy activo</b><br><span style="font-size:11px;color:#aaa">Todo el tráfico está siendo capturado</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para DETENER y guardar</span>');
+      overlay.textContent = '⏹️ Parar';
+      overlay.style.borderColor = '#f44336';
+      overlay.style.background = '#c62828';
     } else {
-      showStatus('❌ <b>Error:</b> ' + (resp.error || resp.msg || 'Desconocido'), 'error');
-      setTimeout(hideStatus, 6000);
+      showStatus('❌ Error: ' + (resp?.error || 'no se pudo iniciar el proxy'), 'error');
+      capturing = false;
+      overlay.textContent = '⬇️ DarkDM';
+      overlay.style.borderColor = '#FF6B35';
+      overlay.style.background = '#1a1a2e';
+      setTimeout(hideStatus, 5000);
     }
   });
 }
 
+function stopCapture() {
+  capturing = false;
+  showStatus('📦 <b>Deteniendo proxy...</b><br><span style="font-size:11px;color:#aaa">Concatenando segmentos</span>');
+  overlay.textContent = '⬇️ DarkDM';
+  overlay.style.borderColor = '#FF6B35';
+  overlay.style.background = '#1a1a2e';
+  overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(currentVideo); };
+
+  chrome.runtime.sendMessage({ type: 'STOP_PROXY_CAPTURE' }, function(resp) {
+    if (resp && resp.success) {
+      showStatus('✅ <b>Captura completada</b><br><span style="font-size:11px;color:#aaa">' + resp.segments + ' segmentos capturados. Revisa ~/Descargas/DarkDM/</span>', 'success');
+    } else {
+      showStatus('⚠️ ' + (resp?.error || 'Error al detener proxy'), 'error');
+    }
+    setTimeout(hideStatus, 8000);
+  });
+}
+
+// ============================================================
 // Mouse tracking
+// ============================================================
 var scanTimer = null;
 document.addEventListener('mousemove', function(e) {
   clearTimeout(scanTimer);
@@ -166,12 +185,11 @@ document.addEventListener('mousemove', function(e) {
   }, 150);
 });
 
-// Auto-attach debugger
+// Auto-init
 setInterval(function() {
   var v = findBestVideo();
   if (v && !v.dataset.ddmReady) {
     v.dataset.ddmReady = '1';
-    try { chrome.runtime.sendMessage({ type: 'ATTACH_DEBUGGER' }); } catch(e) {}
     console.log('[DarkDM] Auto-initialized');
   }
 }, 2000);

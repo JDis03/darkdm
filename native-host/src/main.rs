@@ -4,19 +4,17 @@
 // ============================================================
 
 mod downloader;
-mod proxy;
 
 use downloader::*;
-use proxy::DarkDMProxy;
-use std::sync::Mutex;
 
-static PROXY_INSTANCE: Mutex<Option<DarkDMProxy>> = Mutex::new(None);
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
+
+static PROXY_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 const OUTPUT_DIR: &str = "Descargas/DarkDM";
 
@@ -511,55 +509,83 @@ fn handle_message(msg: &ChromeMessage) -> Response {
         },
 
         // ============================================================
-        // PROXY START - Inicia proxy local para capturar trafico
+        // PROXY START - Inicia proxy como proceso independiente
         // ============================================================
         "PROXY_START" => {
             let session = format!("proxy_{}", chrono_name());
+            let port_str = "8899".to_string();
+            let output_str = output_dir.to_string_lossy().to_string();
             
-            let mut proxy = DarkDMProxy::new(&output_dir, &session);
-            match proxy.start() {
-                Ok(()) => {
-                    let port = proxy.port;
-                    // Store proxy instance
-                    if let Ok(mut p) = PROXY_INSTANCE.lock() {
-                        *p = Some(proxy);
+            // Find the proxy binary (same dir as current exe, or in PATH)
+            let proxy_path = find_binary("darkdm-proxy")
+                .unwrap_or_else(|| "darkdm-proxy".to_string());
+            
+            eprintln!("[DarkDM] Starting proxy: {} {} {} {}", proxy_path, session, output_str, port_str);
+            
+            match Command::new(&proxy_path)
+                .args([&session, &output_str, &port_str])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn() 
+            {
+                Ok(child) => {
+                    let pid = child.id();
+                    if let Ok(mut p) = PROXY_PROCESS.lock() {
+                        *p = Some(child);
                     }
+                    // Give it a moment to bind
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    eprintln!("[DarkDM] Proxy started (PID {}) on port 8899", pid);
                     Response {
                         msg_type: "PROXY_RUNNING".to_string(),
                         success: Some(true), error: None,
-                        message: Some(format!("Proxy running on port {}", port)),
+                        message: Some(format!("Proxy running on port 8899 (PID {})", pid)),
                         progress: None, filename: None,
                         segments: None, bytes: None,
                     }
                 },
-                Err(e) => error_response(&format!("Proxy start failed: {}", e)),
+                Err(e) => error_response(&format!("Failed to start proxy: {}", e)),
             }
         },
 
         // ============================================================
-        // PROXY STOP - Detiene proxy local
+        // PROXY STOP - Detiene proxy y concatena segmentos
         // ============================================================
         "PROXY_STOP" => {
-            if let Ok(mut p) = PROXY_INSTANCE.lock() {
-                if let Some(proxy) = p.take() {
-                    proxy.stop();
-                    // Give it a moment to stop
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    let count = proxy.get_segment_count();
-                    // Now concatenate the captured segments
-                    let session_dir = "proxy_".to_string() + &chrono_name(); // approximate
-                    Response {
-                        msg_type: "PROXY_STOPPED".to_string(),
-                        success: Some(true), error: None,
-                        message: Some(format!("Proxy stopped. {} segments captured", count)),
-                        progress: None, filename: None,
-                        segments: Some(count as usize), bytes: None,
-                    }
+            let proxy_pid = if let Ok(mut p) = PROXY_PROCESS.lock() {
+                if let Some(mut child) = p.take() {
+                    let pid = child.id();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Some(pid)
                 } else {
-                    error_response("No proxy running")
+                    None
                 }
             } else {
-                error_response("Failed to access proxy")
+                None
+            };
+            
+            if let Some(pid) = proxy_pid {
+                eprintln!("[DarkDM] Proxy (PID {}) killed", pid);
+                // Count segments and concatenate
+                let seg_dir = output_dir.join("_proxy_segments");
+                let mut total_segs = 0u64;
+                if let Ok(entries) = std::fs::read_dir(&seg_dir) {
+                    for entry in entries.flatten() {
+                        if entry.path().extension().map_or(false, |e| e == "ts" || e == "m3u8") {
+                            total_segs += 1;
+                        }
+                    }
+                }
+                Response {
+                    msg_type: "PROXY_STOPPED".to_string(),
+                    success: Some(true), error: None,
+                    message: Some(format!("Proxy stopped. {} segments captured", total_segs)),
+                    progress: None, filename: None,
+                    segments: Some(total_segs as usize), bytes: None,
+                }
+            } else {
+                error_response("No proxy was running")
             }
         },
 
