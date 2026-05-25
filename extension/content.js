@@ -121,19 +121,41 @@ function doCapture(video) {
 
 function startCapture() {
   capturing = true;
-  showStatus('🔄 <b>Iniciando proxy...</b><br><span style="font-size:11px;color:#aaa">Capturando tráfico de video</span>');
+  
+  // Pedir contraseña sudo para iptables
+  var sudoPass = prompt('🔒 DarkDM necesita acceso sudo\ningresa tu contraseña para configurar iptables\n(proxy transparente de video):');
+  if (!sudoPass) {
+    showStatus('❌ Captura cancelada (sin contraseña sudo)', 'error');
+    capturing = false;
+    setTimeout(hideStatus, 3000);
+    return;
+  }
+  
+  // Detectar dominio del video
+  var domain = location.hostname;
+  // Intentar encontrar el CDN del video (de los elementos video)
+  var v = currentVideo || findBestVideo();
+  if (v && v.currentSrc) {
+    try { domain = new URL(v.currentSrc).hostname; } catch(e) {}
+  }
+  
+  showStatus('🔄 <b>Iniciando proxy + iptables...</b><br><span style="font-size:11px;color:#aaa">Redirigiendo tráfico HTTP de ' + domain + '</span>');
   overlay.textContent = '⏳...';
   overlay.style.borderColor = '#FF9800';
   overlay.style.background = '#e65100';
 
-  chrome.runtime.sendMessage({ type: 'START_PROXY_CAPTURE' }, function(resp) {
+  chrome.runtime.sendMessage({
+    type: 'START_PROXY_CAPTURE',
+    password: sudoPass,
+    domain: domain
+  }, function(resp) {
     if (resp && resp.success) {
-      showStatus('🔴 <b>Proxy activo</b><br><span style="font-size:11px;color:#aaa">Todo el tráfico está siendo capturado</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para DETENER y guardar</span>');
+      showStatus('🔴 <b>Proxy + iptables activo</b><br><span style="font-size:11px;color:#aaa">Capturando tráfico HTTP de ' + domain + '</span><br><span style="font-size:10px;color:#aaa;display:block;margin-top:2px">Recarga la página para que el tráfico pase por el proxy</span><br><span style="color:#FF6B35;font-size:11px;font-weight:bold">⏹️ Clic para DETENER y guardar</span>');
       overlay.textContent = '⏹️ Parar';
       overlay.style.borderColor = '#f44336';
       overlay.style.background = '#c62828';
     } else {
-      showStatus('❌ Error: ' + (resp?.error || 'no se pudo iniciar el proxy'), 'error');
+      showStatus('❌ Error: ' + (resp?.error || 'no se pudo iniciar'), 'error');
       capturing = false;
       overlay.textContent = '⬇️ DarkDM';
       overlay.style.borderColor = '#FF6B35';

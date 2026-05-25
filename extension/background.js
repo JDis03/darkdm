@@ -1,10 +1,11 @@
-// DarkDM Background — Proxy mode con proceso independiente
-console.log('[DarkDM] Proxy-standalone mode loaded');
+// DarkDM Background — Proxy con iptables (transparente, sin config browser)
+console.log('[DarkDM] Iptables-proxy loaded');
 
 const NH = 'com.darkdm.manager';
 let proxyActive = false;
+let sudoPassword = '';
 
-// Keep alive (evita que el SW se duerma mientras el proxy corre)
+// Keep alive
 setInterval(() => { chrome.runtime.getPlatformInfo(() => {}); }, 10000);
 
 // Native messaging
@@ -19,42 +20,36 @@ function sn(msg) {
 }
 
 // ============================================================
-// Proxy Capture (proceso independiente)
+// Proxy Capture via iptables (transparente)
 // ============================================================
-async function startProxyCapture() {
+async function startProxyCapture(password, domain) {
   if (proxyActive) return { success: false, error: 'Proxy ya activo' };
+  sudoPassword = password;
 
-  // 1) Iniciar proxy en native host (lanza darkdm-proxy como proceso hijo)
-  const resp = await sn({ type: 'PROXY_START' });
+  // 1) Iniciar proxy en native host
+  const resp = await sn({
+    type: 'PROXY_START',
+    sudo_password: password,
+    target_domain: domain
+  });
+
   if (!resp?.success) {
     return { success: false, error: resp?.error || 'Error al iniciar proxy' };
   }
 
-  // 2) Configurar navegador para usar el proxy SOLO para el movie site
-  // Usamos PAC (Proxy Auto-Config) para NO bloquear el resto de sitios
+  // 2) Configurar navegador: fixed_servers (todo por el proxy)
+  //    El proxy reenvia todo, no solo video - asi no importa el CDN
   try {
-    const pacScript = `
-      function FindProxyForURL(url, host) {
-        // Solo proxy para dominios de streaming de video
-        if (shExpMatch(host, "*.solo-latino.com") ||
-            shExpMatch(host, "*.player4me.*") ||
-            shExpMatch(host, "*.solo-latino.*") ||
-            shExpMatch(host, "*.netflix.com") ||
-            shExpMatch(host, "*.primevideo.com") ||
-            shExpMatch(host, "*disney*") ||
-            host.includes("solo-latino") ||
-            host.includes("player4me")) {
-          return "PROXY 127.0.0.1:8899";
-        }
-        return "DIRECT";
-      }
-    `;
-
     await new Promise((resolve, reject) => {
       chrome.proxy.settings.set({
         value: {
-          mode: 'pac_script',
-          pacScript: { data: pacScript }
+          mode: 'fixed_servers',
+          rules: {
+            // Solo HTTP por el proxy (los .ts van por HTTP)
+            proxyForHttp: { scheme: 'http', host: '127.0.0.1', port: 8899 },
+            // HTTPS va directo (asi no se bloquea nada)
+            bypassList: ['127.0.0.1', 'localhost', '::1', '<local>']
+          }
         },
         scope: 'regular'
       }, () => {
@@ -64,34 +59,33 @@ async function startProxyCapture() {
     });
 
     proxyActive = true;
-    console.log('[DarkDM] PAC proxy active (selective domains)');
-    return { success: true, port: 8899, message: 'Proxy selectivo activo (solo sitios de video)' };
+    console.log('[DarkDM] Proxy + fixed_servers active');
+    return { success: true, message: 'Proxy activo (todo el tráfico HTTP por el proxy)' };
 
   } catch (e) {
-    // Si falla, probar modo fixed_servers como fallback
-    try {
-      await new Promise((resolve, reject) => {
-        chrome.proxy.settings.set({
-          value: {
-            mode: 'fixed_servers',
-            rules: {
-              singleProxy: { scheme: 'http', host: '127.0.0.1', port: 8899 },
-              bypassList: ['127.0.0.1', 'localhost', '::1', '<local>']
-            }
-          },
-          scope: 'regular'
-        }, () => {
-          if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-          else resolve();
-        });
-      });
+    // Si no se puede configurar el proxy del navegador,
+    // el proxy + iptables aun funciona para el dominio especifico
+    if (domain) {
       proxyActive = true;
-      return { success: true, port: 8899, message: 'Proxy global activo' };
-    } catch (e2) {
-      await sn({ type: 'PROXY_STOP' });
-      return { success: false, error: 'Error al configurar proxy: ' + e.message };
+      return { success: true, message: 'Proxy + iptables activo para ' + domain };
     }
+    await sn({ type: 'PROXY_STOP' });
+    return { success: false, error: 'Error al configurar proxy: ' + e.message };
   }
+}
+
+async function stopProxyCapture() {
+  if (!proxyActive) return { success: false, error: 'No hay proxy activo' };
+
+  const resp = await sn({ type: 'PROXY_STOP' });
+  proxyActive = false;
+  sudoPassword = '';
+
+  return {
+    success: resp?.success !== false,
+    segments: resp?.segments || 0,
+    message: resp?.message || 'Proxy detenido'
+  };
 }
 
 async function stopProxyCapture() {

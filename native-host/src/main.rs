@@ -15,6 +15,59 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
 
 static PROXY_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+static SUDO_PASSWORD: Mutex<String> = Mutex::new(String::new());
+static IPTABLES_DOMAINS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn run_iptables(action: &str, domain: &str, port: u16) -> bool {
+    let pass = SUDO_PASSWORD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if pass.is_empty() { return false; }
+    
+    // iptables -t nat -A/D OUTPUT -p tcp -d <domain> --dport 80 -j REDIRECT --to-port <port>
+    let ipt_cmd = format!(
+        "{} -t nat -A OUTPUT -p tcp -d {} --dport 80 -j REDIRECT --to-port {}",
+        if action == "add" { "iptables" } else { "iptables -D" },
+        domain, port
+    );
+    // Redo with -D for remove
+    let ipt_cmd = if action == "remove" {
+        format!(
+            "iptables -t nat -D OUTPUT -p tcp -d {} --dport 80 -j REDIRECT --to-port {}",
+            domain, port
+        )
+    } else {
+        ipt_cmd
+    };
+    
+    eprintln!("[DarkDM] Running: sudo {}", ipt_cmd);
+    
+    let mut child = match Command::new("sudo")
+        .args(["-S", "sh", "-c", &ipt_cmd])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    
+    // Send password via stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(format!("{}\n", pass).as_bytes());
+    }
+    
+    match child.wait() {
+        Ok(s) if s.success() => {
+            eprintln!("[DarkDM] iptables {} for {}: OK", action, domain);
+            true
+        },
+        _ => {
+            eprintln!("[DarkDM] iptables {} for {}: FAILED", action, domain);
+            false
+        }
+    }
+}
 
 const OUTPUT_DIR: &str = "Descargas/DarkDM";
 
@@ -515,6 +568,8 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             let session = format!("proxy_{}", chrono_name());
             let port_str = "8899".to_string();
             let output_str = output_dir.to_string_lossy().to_string();
+            let sudo_pass = msg.extra.get("sudo_password").and_then(|v| v.as_str()).unwrap_or("");
+            let target_domain = msg.extra.get("target_domain").and_then(|v| v.as_str()).unwrap_or("");
             
             // Find the proxy binary: same directory as current exe, or PATH, or default
             let proxy_path = std::env::current_exe()
@@ -533,19 +588,36 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             
             eprintln!("[DarkDM] Starting proxy: {} {} {} {}", proxy_path, session, output_str, port_str);
             
-            match Command::new(&proxy_path)
+            // Store sudo password for cleanup later
+            if !sudo_pass.is_empty() {
+                if let Ok(mut p) = SUDO_PASSWORD.lock() {
+                    *p = sudo_pass.to_string();
+                }
+            }
+            
+            // Start the proxy
+            let child_result = Command::new(&proxy_path)
                 .args([&session, &output_str, &port_str])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn() 
-            {
+                .spawn();
+            
+            match child_result {
                 Ok(child) => {
                     let pid = child.id();
                     if let Ok(mut p) = PROXY_PROCESS.lock() {
                         *p = Some(child);
                     }
-                    // Give it a moment to bind
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    
+                    // Add iptables rule for the target domain
+                    if !target_domain.is_empty() && !sudo_pass.is_empty() {
+                        run_iptables("add", target_domain, 8899);
+                        if let Ok(mut d) = IPTABLES_DOMAINS.lock() {
+                            d.push(target_domain.to_string());
+                        }
+                    }
+                    
                     eprintln!("[DarkDM] Proxy started (PID {}) on port 8899", pid);
                     Response {
                         msg_type: "PROXY_RUNNING".to_string(),
@@ -560,9 +632,20 @@ fn handle_message(msg: &ChromeMessage) -> Response {
         },
 
         // ============================================================
-        // PROXY STOP - Detiene proxy y concatena segmentos
+        // PROXY STOP - Detiene proxy, limpia iptables, concatena
         // ============================================================
         "PROXY_STOP" => {
+            // Remove iptables rules
+            if let Ok(domains) = IPTABLES_DOMAINS.lock() {
+                for domain in domains.iter() {
+                    run_iptables("remove", domain, 8899);
+                }
+            }
+            if let Ok(mut d) = IPTABLES_DOMAINS.lock() {
+                d.clear();
+            }
+            
+            // Kill proxy process
             let proxy_pid = if let Ok(mut p) = PROXY_PROCESS.lock() {
                 if let Some(mut child) = p.take() {
                     let pid = child.id();
@@ -577,13 +660,12 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             };
             
             if let Some(pid) = proxy_pid {
-                eprintln!("[DarkDM] Proxy (PID {}) killed", pid);
-                // Count segments and concatenate
+                eprintln!("[DarkDM] Proxy (PID {}) killed, iptables cleaned", pid);
                 let seg_dir = output_dir.join("_proxy_segments");
                 let mut total_segs = 0u64;
                 if let Ok(entries) = std::fs::read_dir(&seg_dir) {
                     for entry in entries.flatten() {
-                        if entry.path().extension().map_or(false, |e| e == "ts" || e == "m3u8") {
+                        if entry.path().extension().map_or(false, |e| e == "ts" || e == "m3u8" || e == "mp4") {
                             total_segs += 1;
                         }
                     }
@@ -596,7 +678,14 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                     segments: Some(total_segs as usize), bytes: None,
                 }
             } else {
-                error_response("No proxy was running")
+                // Even if no proxy, still report success since iptables was cleaned
+                Response {
+                    msg_type: "PROXY_STOPPED".to_string(),
+                    success: Some(true), error: None,
+                    message: Some("Proxy cleaned up".to_string()),
+                    progress: None, filename: None,
+                    segments: None, bytes: None,
+                }
             }
         },
 

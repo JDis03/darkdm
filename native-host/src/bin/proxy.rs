@@ -112,16 +112,28 @@ fn handle_client(mut client: TcpStream, seg_dir: &std::path::Path, seg_count: &A
     if parts.len() < 3 { return; }
 
     let method = parts[0];
-    let target = parts[1];
+    let mut target = parts[1].to_string();
 
     if method == "CONNECT" {
-        handle_connect(client, target);
+        handle_connect(client, &target);
         return;
     }
 
-    if !target.starts_with("http://") && !target.starts_with("https://") { return; }
+    // Transparent proxy mode: request is just a path like /file.ts
+    // Extract the real host from Host header
+    if !target.starts_with("http://") && !target.starts_with("https://") {
+        let host = request_str.lines()
+            .find(|l| l.to_lowercase().starts_with("host:"))
+            .and_then(|l| l.splitn(2, ':').nth(1))
+            .map(|h| h.trim())
+            .unwrap_or("");
+        if host.is_empty() { return; }
+        let scheme = if target.starts_with("https://") { "https" } else { "http" };
+        target = format!("{}://{}{}", scheme, host, target);
+        eprintln!("[DarkDM Proxy] Transparent: {} -> {}", parts[1], target);
+    }
 
-    let parsed_url = match url::Url::parse(target) {
+    let parsed_url = match url::Url::parse(&target) {
         Ok(u) => u,
         Err(_) => return,
     };
@@ -142,7 +154,7 @@ fn handle_client(mut client: TcpStream, seg_dir: &std::path::Path, seg_count: &A
     let _ = server.set_read_timeout(Some(Duration::from_secs(30)));
     let _ = server.set_write_timeout(Some(Duration::from_secs(30)));
 
-    let rewritten = request_str.replacen(target, &request_target, 1);
+    let rewritten = request_str.replacen(&target, &request_target, 1);
     if server.write_all(rewritten.as_bytes()).is_err() { return; }
 
     // Read response headers
@@ -201,7 +213,7 @@ fn handle_client(mut client: TcpStream, seg_dir: &std::path::Path, seg_count: &A
                   else if target.ends_with(".m4s") { "m4s" }
                   else { "bin" };
         let seg_path = seg_dir.join(format!("{:05}.{}", seq, ext));
-        eprintln!("[DarkDM Proxy] Saving: {} -> {}", target.split('?').next().unwrap_or(target), seg_path.display());
+        eprintln!("[DarkDM Proxy] Saving: {} -> {}", target.split('?').next().unwrap_or(target.as_str()), seg_path.display());
 
         if let Ok(mut file) = std::fs::File::create(&seg_path) {
             let _ = file.write_all(&resp_headers);
