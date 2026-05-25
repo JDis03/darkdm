@@ -516,9 +516,20 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             let port_str = "8899".to_string();
             let output_str = output_dir.to_string_lossy().to_string();
             
-            // Find the proxy binary (same dir as current exe, or in PATH)
-            let proxy_path = find_binary("darkdm-proxy")
-                .unwrap_or_else(|| "darkdm-proxy".to_string());
+            // Find the proxy binary: same directory as current exe, or PATH, or default
+            let proxy_path = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("darkdm-proxy")))
+                .filter(|p| p.exists())
+                .map(|p| p.to_string_lossy().to_string())
+                .or_else(|| find_binary("darkdm-proxy"))
+                .unwrap_or_else(|| {
+                    // Default: look in ~/.local/bin/
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let fallback = format!("{}/.local/bin/darkdm-proxy", home);
+                    if Path::new(&fallback).exists() { fallback }
+                    else { "darkdm-proxy".to_string() }
+                });
             
             eprintln!("[DarkDM] Starting proxy: {} {} {} {}", proxy_path, session, output_str, port_str);
             
@@ -668,11 +679,25 @@ fn which(name: &str) -> bool {
 
 /// Find a binary, checking the DarkDM venv first
 fn find_binary(name: &str) -> Option<String> {
-    // Check DarkDM venv first (has curl_cffi for impersonation)
     let home = std::env::var("HOME").unwrap_or_default();
-    let venv_path = format!("{}/.local/share/darkdm/venv/bin/{}", home, name);
-    if Path::new(&venv_path).exists() {
-        return Some(venv_path);
+    let locations = vec![
+        // Same directory as current exe
+        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name).to_string_lossy().to_string())),
+        // DarkDM venv
+        Some(format!("{}/.local/share/darkdm/venv/bin/{}", home, name)),
+        // ~/.local/bin/
+        Some(format!("{}/.local/bin/{}", home, name)),
+        // ~/bin/
+        Some(format!("{}/bin/{}", home, name)),
+        // /usr/local/bin/
+        Some(format!("/usr/local/bin/{}", name)),
+        // /usr/bin/
+        Some(format!("/usr/bin/{}", name)),
+    ];
+    for loc in locations.into_iter().flatten() {
+        if Path::new(&loc).exists() {
+            return Some(loc);
+        }
     }
     // Fall back to PATH
     std::env::var("PATH").ok().and_then(|path| {
