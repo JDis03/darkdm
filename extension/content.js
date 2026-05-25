@@ -203,7 +203,6 @@ function doCaptureStream(video) {
     showStatus('🎬 <b>Grabando...</b><br><span style="font-size:11px;color:#aaa">Se guarda automáticamente cada 30s</span><br><span style="color:#FF6B35;font-size:11px">⏹️ Clic para detener</span>');
     var mt = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' : 'video/webm';
     var baseName = (document.title || 'video').replace(/[^a-zA-Z0-9]/g,'_').substring(0,50);
-    var chunkNum = 1;
     
     var rec = new MediaRecorder(stream, { mimeType: mt, videoBitsPerSecond: 8000000 });
     
@@ -219,7 +218,10 @@ function doCaptureStream(video) {
     
     rec.onstop = function() {
       video.removeEventListener('ended', onVideoEnd);
-      restoreOverlayToNormal(video);
+      // Restaurar overlay
+      overlay.textContent = '⬇️ DarkDM';
+      overlay.style.borderColor = '#FF6B35';
+      overlay.onclick = function(e3) { e3.stopPropagation(); e3.preventDefault(); doCapture(video); };
       if (allParts.length) {
         var blob = new Blob(allParts, { type: mt });
         var fname = baseName + '_completa.webm';
@@ -256,14 +258,13 @@ function doCaptureStream(video) {
   }
 }
 
-// N3: EME/DRM → yt-dlp con cookies del navegador (como IDM site grabber)
+// N3: EME/DRM → yt-dlp con cookies del navegador (la solución real)
 function doEMECapture(video) {
   var url = location.href;
   var title = document.title;
 
-  showStatus('🔒 <b>DRM detectado</b><br>Extrayendo con yt-dlp...<br><span style="font-size:11px;color:#aaa">Usa las cookies de tu sesión</span>');
+  showStatus('🔒 <b>DRM detectado</b><br>Extrayendo con yt-dlp...<br><span style="font-size:11px;color:#aaa">Usa cookies de tu sesión</span>');
 
-  // Enviar al native host para extracción con yt-dlp + cookies
   try {
     chrome.runtime.sendMessage({
       type: 'EXTRACT_PAGE',
@@ -273,99 +274,15 @@ function doEMECapture(video) {
       site: getHostname()
     }, function(resp) {
       if (resp && resp.success) {
-        showStatus('✅ <b>Descarga iniciada</b><br>Verifica en ~/Descargas/DarkDM/', 'success');
+        showStatus('✅ <b>Descarga iniciada</b><br>Verifica en ~/Descargas/DarkDM/<br><span style="font-size:11px;color:#aaa">' + (resp.msg || '') + '</span>', 'success');
       } else {
-        // Si yt-dlp falla, ofrecer captura de pantalla como respaldo
-        showStatus('⚠️ <b>yt-dlp no pudo extraer</b><br>Usa "🖥️ Pantalla" como respaldo', 'error');
-        setupDisplayFallback(video);
+        var errMsg = (resp && resp.msg) ? resp.msg : 'Error desconocido';
+        showStatus('❌ <b>yt-dlp falló</b><br><span style="font-size:11px;color:#f44336">' + errMsg + '</span><br><span style="font-size:10px;color:#aaa;display:block;margin-top:4px">Ejecuta manualmente: yt-dlp --cookies-from-browser vivaldi --impersonate chrome "' + url + '"</span>', 'error');
       }
     });
   } catch(e) {
-    showStatus('❌ Error al conectar con el host', 'error');
+    showStatus('❌ Error al conectar con el host nativo', 'error');
   }
-}
-
-// N4: Captura de pantalla (getDisplayMedia) — funciona con TODO
-function doDisplayCapture(video) {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    showStatus('❌ Captura de pantalla no soportada en este navegador', 'error');
-    return;
-  }
-
-  showStatus('🖥️ <b>Selecciona la ventana/pestaña</b><br>Elige la del video en el diálogo');
-
-  navigator.mediaDevices.getDisplayMedia({
-    video: { width: 1920, height: 1080, frameRate: 30 },
-    audio: true
-  }).then(function(displayStream) {
-    var baseName = (document.title || 'video').replace(/[^a-zA-Z0-9]/g,'_').substring(0,50);
-    var mt = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' : 'video/webm';
-    var rec = new MediaRecorder(displayStream, { mimeType: mt, videoBitsPerSecond: 8000000 });
-    var allParts = [];
-
-    showStatus('🖥️ <b>Grabando pantalla...</b><br><span style="font-size:11px;color:#aaa">Se guarda automáticamente</span><br><span style="color:#FF6B35;font-size:11px">⏹️ Clic para detener</span>');
-
-    rec.ondataavailable = function(e) {
-      if (e.data.size && e.data.size > 1000) {
-        allParts.push(e.data);
-        var totalMB = 0;
-        for (var i = 0; i < allParts.length; i++) totalMB += allParts[i].size;
-        showStatus('🖥️ <b>Grabando...</b><br><span style="font-size:11px;color:#aaa">' + (totalMB/1048576).toFixed(0) + 'MB</span><br><span style="color:#FF6B35;font-size:11px">⏹️ Clic para detener</span>');
-      }
-    };
-
-    rec.onstop = function() {
-      displayStream.getTracks().forEach(function(t) { t.stop(); });
-      if (allParts.length) {
-        var blob = new Blob(allParts, { type: mt });
-        var fname = baseName + '_pantalla.webm';
-        var blobUrl = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = blobUrl; a.download = fname; a.style.display = 'none';
-        document.body.appendChild(a); a.click();
-        setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(blobUrl); }, 5000);
-        showStatus('✅ Captura guardada: ' + (blob.size/1048576).toFixed(0) + 'MB', 'success');
-      }
-      setTimeout(hideStatus, 5000);
-      restoreOverlayToNormal(video);
-    };
-
-    rec.start(10000); // 10s por chunk
-
-    overlay.textContent = '🖥️ Grabando...';
-    overlay.style.borderColor = '#FF9800';
-    overlay.onclick = function(e2) {
-      e2.stopPropagation(); e2.preventDefault();
-      if (rec.state !== 'inactive') rec.stop();
-    };
-
-    // Detener si se cierra el stream (el usuario hace clic en "Detener compartir")
-    displayStream.getVideoTracks()[0].onended = function() {
-      if (rec.state !== 'inactive') rec.stop();
-    };
-  }).catch(function(err) {
-    if (err.name === 'NotAllowedError') {
-      showStatus('❌ Captura cancelada por el usuario', 'error');
-    } else {
-      showStatus('❌ Error: ' + err.message, 'error');
-    }
-    setTimeout(hideStatus, 4000);
-  });
-}
-
-function setupDisplayFallback(video) {
-  overlay.textContent = '🖥️ Pantalla';
-  overlay.style.borderColor = '#FF9800';
-  overlay.onclick = function(e) {
-    e.stopPropagation(); e.preventDefault();
-    doDisplayCapture(video);
-  };
-}
-
-function restoreOverlayToNormal(video) {
-  overlay.textContent = '⬇️ DarkDM';
-  overlay.style.borderColor = '#FF6B35';
-  overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(video); };
 }
 
 // ============================================================

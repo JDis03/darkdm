@@ -91,46 +91,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
 
     case 'EXTRACT_PAGE':
-      // Enviar a native host (yt-dlp con cookies)
       sn({type:'EXTRACT_PAGE', url: msg.url, title: msg.title, tab_id: tabId, 
           site: msg.site, hasDrm: msg.hasDrm})
         .then(resp => {
-          const success = resp && (resp.msg_type === 'DOWNLOAD_STARTED' || resp.msg_type === 'DOWNLOAD_RESULT') && resp.success;
-          sendResponse({success: !!success, msg: resp?.message || 'No response'});
+          const success = resp && (['DOWNLOAD_STARTED','DOWNLOAD_RESULT'].includes(resp.msg_type) && resp.success);
+          const errMsg = resp?.error || resp?.message || 'Sin respuesta del host nativo';
+          sendResponse({success: !!success, msg: success ? (resp?.message || 'OK') : errMsg});
         })
-        .catch(() => sendResponse({success: false, msg: 'Native host not reachable'}));
-      return true;
-
-    case 'TAB_CAPTURE':
-      // Fallback: chrome.tabCapture para sitios con DRM
-      chrome.tabCapture.capture({ video: true, audio: true }, stream => {
-        if (chrome.runtime.lastError || !stream) {
-          sendResponse({success: false, error: chrome.runtime.lastError?.message || 'No stream'});
-          return;
-        }
-        // Iniciar grabación en background
-        try {
-          const mt = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') 
-            ? 'video/webm;codecs=vp9,opus' : 'video/webm';
-          const rec = new MediaRecorder(stream, { mimeType: mt, videoBitsPerSecond: 8000000 });
-          const parts = [];
-          rec.ondataavailable = e => { if (e.data?.size > 1000) parts.push(e.data); };
-          rec.onstop = () => {
-            stream.getTracks().forEach(t => t.stop());
-            if (parts.length) {
-              const blob = new Blob(parts, { type: mt });
-              const url = URL.createObjectURL(blob);
-              const fname = msg.filename || ('tab_capture_' + Date.now() + '.webm');
-              chrome.downloads.download({ url, filename: 'DarkDM/' + fname, saveAs: false });
-              setTimeout(() => URL.revokeObjectURL(url), 10000);
-            }
-          };
-          rec.start(15000);
-          sendResponse({success: true, recording: true});
-        } catch(e) {
-          sendResponse({success: false, error: e.message});
-        }
-      });
+        .catch(() => sendResponse({success: false, msg: 'Host nativo no disponible'}));
       return true;
 
     case 'BUFFER_CAPTURE':

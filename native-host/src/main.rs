@@ -204,7 +204,12 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 Some(u) => u.clone(),
                 None => return error_response("No URL provided"),
             };
-            match extract_with_ytdlp(&url, &output_dir) {
+            let has_drm = msg.extra.get("hasDrm")
+                .and_then(|v| v.as_bool()).unwrap_or(false);
+            let site = msg.extra.get("site")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            
+            match extract_with_ytdlp(&url, &output_dir, has_drm, site) {
                 Ok(path) => Response {
                     msg_type: "DOWNLOAD_STARTED".to_string(),
                     success: Some(true), error: None,
@@ -325,7 +330,7 @@ fn error_response(msg: &str) -> Response {
 }
 
 /// Extract video from complex sites using yt-dlp (Netflix, Prime, etc.)
-fn extract_with_ytdlp(url: &str, output_dir: &Path) -> Result<String, String> {
+fn extract_with_ytdlp(url: &str, output_dir: &Path, has_drm: bool, site: &str) -> Result<String, String> {
     if !which("yt-dlp") {
         return Err("yt-dlp not found. Install it: https://github.com/yt-dlp/yt-dlp".to_string());
     }
@@ -337,21 +342,33 @@ fn extract_with_ytdlp(url: &str, output_dir: &Path) -> Result<String, String> {
     // Cookies from browser (Netflix, Prime, etc. require auth)
     let cookies_arg = format!("--cookies-from-browser={}", get_browser_name());
 
-    eprintln!("[DarkDM] Running yt-dlp for: {}", url);
-    eprintln!("[DarkDM] yt-dlp args: -o {} --impersonate chrome {} --cookies-from-browser={}", 
-              template_str, url, get_browser_name());
+    eprintln!("[DarkDM] Running yt-dlp for: {} (drm={}, site={})", url, has_drm, site);
+
+    // Build base args
+    let mut args: Vec<&str> = vec![
+        "-o", &template_str,
+        "--no-playlist",
+        "--limit-rate", "50M",
+        "--concurrent-fragments", "8",
+    ];
+
+    // For DRM sites, add impersonation + cookies + format selection
+    // (Netflix needs specific format/flags vs normal sites)
+    if has_drm || !site.is_empty() {
+        args.extend_from_slice(&["--impersonate", "chrome"]);
+        args.push(&cookies_arg);
+        // DRM sites often benefit from merging best video+audio
+        args.extend_from_slice(&["-f", "bestvideo+bestaudio/best"]);
+    } else {
+        args.extend_from_slice(&["--impersonate", "chrome"]);
+    }
+    args.push("--verbose");
+    args.push(url);
+
+    eprintln!("[DarkDM] yt-dlp args: {:?}", args);
 
     let output = Command::new("yt-dlp")
-        .args([
-            "-o", &template_str,
-            "--no-playlist",
-            "--limit-rate", "50M",
-            "--concurrent-fragments", "8",
-            "--impersonate", "chrome",
-            &cookies_arg,
-            "--verbose",
-            url,
-        ])
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -370,14 +387,19 @@ fn extract_with_ytdlp(url: &str, output_dir: &Path) -> Result<String, String> {
         eprintln!("[DarkDM] yt-dlp failed (1st attempt with cookies): {}", stderr);
 
         // Retry without cookies (for public sites)
+        let mut retry_args: Vec<&str> = vec![
+            "-o", &template_str,
+            "--no-playlist",
+            "--concurrent-fragments", "8",
+            "--impersonate", "chrome",
+        ];
+        if has_drm {
+            retry_args.extend_from_slice(&["-f", "bestvideo+bestaudio/best"]);
+        }
+        retry_args.push(url);
+
         let output2 = Command::new("yt-dlp")
-            .args([
-                "-o", &template_str,
-                "--no-playlist",
-                "--concurrent-fragments", "8",
-                "--impersonate", "chrome",
-                url,
-            ])
+            .args(&retry_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -424,15 +446,25 @@ fn find_ytdlp_output(stderr: &str, output_dir: &Path) -> Option<String> {
 }
 
 /// Extract a useful error message from yt-dlp output
-fn extract_error(err: &str) -> &str {
-    // Get the last meaningful line
-    for line in err.lines().rev() {
-        let l = line.trim();
-        if !l.is_empty() && !l.contains('[') && l.len() > 10 {
-            return l;
-        }
+fn extract_error(err: &str) -> String {
+    let mut lines: Vec<&str> = err.lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && t.len() > 10 && !t.starts_with('[')
+        })
+        .collect();
+    // Take last 3 meaningful lines
+    let count = lines.len();
+    let relevant: Vec<&str> = if count > 3 {
+        lines.split_off(count - 3)
+    } else {
+        lines
+    };
+    if relevant.is_empty() {
+        "See verbose output above".to_string()
+    } else {
+        relevant.join(" | ")
     }
-    "See verbose output above"
 }
 
 fn get_browser_name() -> &'static str {
