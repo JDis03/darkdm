@@ -260,20 +260,56 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             if !cookies.is_empty() {
                 let _ = std::fs::write(&cookies_path, cookies);
             }
+
+            // Try yt-dlp FIRST (handles dynamic playlists, refreshes manifest, 
+            // proper segment numbering, handles encryption, retry logic)
+            if which("yt-dlp") {
+                eprintln!("[DarkDM] yt-dlp download from manifest");
+                let ytdlp_path = find_binary("yt-dlp").unwrap_or_else(|| "yt-dlp".to_string());
+                
+                let mut ytdlp_cmd = Command::new(&ytdlp_path);
+                ytdlp_cmd.args(["-o", &output_str, "--no-playlist", 
+                               "--concurrent-fragments", "8",
+                               "--impersonate", "chrome-131",
+                               "--limit-rate", "50M",
+                               &manifest_url]);
+                
+                if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+                    ytdlp_cmd.args(["--cookies", &cookies_path.to_string_lossy()]);
+                }
+                
+                eprintln!("[DarkDM] Running yt-dlp...");
+                let start = std::time::Instant::now();
+                let status = ytdlp_cmd
+                    .stdout(Stdio::null()).stderr(Stdio::null())
+                    .status();
+                
+                let elapsed = start.elapsed();
+                let _ = std::fs::remove_file(&cookies_path);
+                
+                match status {
+                    Ok(s) if s.success() => {
+                        let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                        eprintln!("[DarkDM] yt-dlp OK: {} bytes in {:?}", size, elapsed);
+                        return ok_response(&format!("Downloaded: {} bytes in {:?}", size, elapsed), &output_str, size);
+                    },
+                    _ => {
+                        eprintln!("[DarkDM] yt-dlp failed ({:?}), trying ffmpeg fallback", elapsed);
+                    }
+                }
+            }
             
-            // Try ffmpeg with proper headers + cookies
+            // Fallback: ffmpeg (only gets segments listed at capture time)
             if which("ffmpeg") {
                 eprintln!("[DarkDM] ffmpeg download from manifest");
                 
                 let mut ffmpeg_cmd = Command::new("ffmpeg");
                 ffmpeg_cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
                 
-                // Add cookies if available
                 if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
                     ffmpeg_cmd.args(["-cookies", &cookies_path.to_string_lossy()]);
                 }
                 
-                // Add custom headers (User-Agent, Referer, etc.)
                 if let Ok(headers_map) = serde_json::from_str::<std::collections::HashMap<String, String>>(headers_json) {
                     for (k, v) in &headers_map {
                         if k.eq_ignore_ascii_case("user-agent") || k.eq_ignore_ascii_case("referer") {
@@ -281,49 +317,14 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                         }
                     }
                 } else {
-                    // Fallback User-Agent
                     ffmpeg_cmd.args(["-user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"]);
                 }
                 
-                // Input from manifest URL
                 ffmpeg_cmd.args(["-i", &manifest_url]);
                 ffmpeg_cmd.args(["-c", "copy", "-movflags", "+faststart", &output_str]);
                 
                 eprintln!("[DarkDM] Running ffmpeg...");
-                let start = std::time::Instant::now();
                 let status = ffmpeg_cmd
-                    .stdout(Stdio::null()).stderr(Stdio::null())
-                    .status();
-                
-                match status {
-                    Ok(s) if s.success() => {
-                        let elapsed = start.elapsed();
-                        let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                        eprintln!("[DarkDM] ffmpeg OK: {} bytes in {:?}", size, elapsed);
-                        // Cleanup temp cookies
-                        let _ = std::fs::remove_file(&cookies_path);
-                        return ok_response(&format!("Downloaded: {} bytes in {:?}", size, elapsed), &output_str, size);
-                    },
-                    _ => {
-                        eprintln!("[DarkDM] ffmpeg failed, trying yt-dlp");
-                    }
-                }
-            }
-            
-            // Fallback: yt-dlp
-            if which("yt-dlp") {
-                eprintln!("[DarkDM] yt-dlp download from manifest");
-                let ytdlp_path = find_binary("yt-dlp").unwrap_or_else(|| "yt-dlp".to_string());
-                
-                let mut ytdlp_cmd = Command::new(&ytdlp_path);
-                ytdlp_cmd.args(["-o", &output_str, "--no-playlist", "--concurrent-fragments", "8",
-                               "--impersonate", "chrome-131", &manifest_url]);
-                
-                if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
-                    ytdlp_cmd.args(["--cookies", &cookies_path.to_string_lossy()]);
-                }
-                
-                let status = ytdlp_cmd
                     .stdout(Stdio::null()).stderr(Stdio::null())
                     .status();
                 
@@ -332,10 +333,10 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 match status {
                     Ok(s) if s.success() => {
                         let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                        return ok_response(&format!("Downloaded via yt-dlp: {} bytes", size), &output_str, size);
+                        return ok_response(&format!("Downloaded via ffmpeg: {} bytes", size), &output_str, size);
                     },
                     _ => {
-                        return error_response("Both ffmpeg and yt-dlp failed. The manifest might be protected or segments are encrypted.");
+                        return error_response("Both yt-dlp and ffmpeg failed. The manifest might be protected or segments are encrypted.");
                     }
                 }
             }
