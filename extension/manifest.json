@@ -18,7 +18,8 @@
     "activeTab",
     "scripting",
     "debugger",
-    "cookies"
+    "cookies",
+    "webRequest"
   ],
   "host_permissions": [
     "http://*/*",
@@ -29,17 +30,17 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "http://*/*",
-        "https://*/*"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "css": [
-        "content.css"
-      ],
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
       "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content_main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
       "all_frames": true
     }
   ],

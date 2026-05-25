@@ -1,13 +1,32 @@
 // ============================================================
-// DarkDM — Debugger + yt-dlp (Versión final)
+// DarkDM — ISOLATED World (UI + relay a background)
 // ============================================================
 (function() {
 'use strict';
-console.log('[DarkDM] Final loaded');
+console.log('[DarkDM] ISOLATED loaded');
 
 var overlay = null, currentVideo = null, hideTimer = null;
 var downloading = false;
 
+// ============================================================
+// Escuchar manifests desde MAIN world via CustomEvent
+// ============================================================
+document.addEventListener('__ddm_manifest', function(e) {
+  const { url, body, headers } = e.detail;
+  console.log('[DarkDM] Manifest from MAIN:', url.substring(0, 80));
+
+  // Reenviar a background con cookies de extension API
+  chrome.runtime.sendMessage({
+    type: 'MANIFEST_FOUND',
+    url: url,
+    body: body,
+    headers: headers
+  }).catch(() => {});
+});
+
+// ============================================================
+// Find videos
+// ============================================================
 function findAllVideos(root) {
   root = root || document;
   var vids = [];
@@ -34,6 +53,9 @@ function findBestVideo() {
   return best || vids[0];
 }
 
+// ============================================================
+// OVERLAY
+// ============================================================
 function createOverlay(v) {
   removeOverlay();
   var el = document.createElement('div');
@@ -62,6 +84,9 @@ function removeOverlay() {
   currentVideo = null;
 }
 
+// ============================================================
+// STATUS PANEL
+// ============================================================
 var panel = null;
 function showStatus(msg, type) {
   if (!panel) {
@@ -91,7 +116,7 @@ function doCapture(video) {
   }
 
   downloading = true;
-  showStatus('📡 <b>Descargando...</b><br><span style="font-size:11px;color:#aaa">Usando manifest + yt-dlp</span><br><span style="font-size:10px;color:#4CAF50">Cookies reales del navegador + mejor calidad</span>');
+  showStatus('📡 <b>Descargando...</b><br><span style="font-size:11px;color:#aaa">Usando manifest + yt-dlp</span>');
 
   overlay.textContent = '⏳...';
   overlay.style.borderColor = '#2196F3';
@@ -117,7 +142,9 @@ function doCapture(video) {
   });
 }
 
+// ============================================================
 // Mouse tracking
+// ============================================================
 var scanTimer = null;
 document.addEventListener('mousemove', function(e) {
   clearTimeout(scanTimer);
@@ -138,15 +165,5 @@ document.addEventListener('mousemove', function(e) {
     } catch(err) {}
   }, 150);
 });
-
-// Auto-attach debugger
-setInterval(function() {
-  var v = findBestVideo();
-  if (v && !v.dataset.ddmReady) {
-    v.dataset.ddmReady = '1';
-    try { chrome.runtime.sendMessage({ type: 'ATTACH_DEBUGGER' }); } catch(e) {}
-    console.log('[DarkDM] Auto-initialized');
-  }
-}, 2000);
 
 })();

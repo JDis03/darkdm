@@ -131,6 +131,64 @@ async function downloadVideo(manifest, title) {
 }
 
 // ============================================================
+// MANIFEST_FOUND — desde content script MAIN world (el más temprano)
+// ============================================================
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (msg.type === 'MANIFEST_FOUND' && sender.tab?.id) {
+    const tabId = sender.tab.id;
+    // Guardar en cache (priorizar el que tiene body)
+    if (!manifestCache[tabId] || !manifestCache[tabId].body) {
+      manifestCache[tabId] = {
+        url: msg.url,
+        body: msg.body,
+        headers: msg.headers || {},
+        pageUrl: sender.tab.url || '',
+        requestId: 'cs_' + Date.now(),
+        source: 'content_script'
+      };
+      console.log('[DarkDM] Manifest from content script:', 
+        msg.url.substring(0, 80),
+        msg.body?.includes('#EXT-X-STREAM-INF') ? '(MASTER)' : '(VARIANT)');
+    }
+  }
+});
+
+// ============================================================
+// webRequest fallback — captura headers aunque el body no esté disponible
+// ============================================================
+try {
+  if (chrome.webRequest) {
+    chrome.webRequest.onSendHeaders.addListener(
+      (details) => {
+        const url = details.url;
+        if (!url.match(/\.(m3u8|mpd)(\?|$)/i)) return;
+        const tabId = details.tabId;
+        if (tabId < 0) return;
+        if (manifestCache[tabId]?.url === url) return; // ya lo tenemos
+        
+        // Extraer headers relevantes
+        const headers = {};
+        (details.requestHeaders || []).forEach(({ name, value }) => {
+          const n = name.toLowerCase();
+          if (['referer', 'origin', 'cookie', 'user-agent'].includes(n)) {
+            headers[name] = value;
+          }
+        });
+        
+        manifestCache[tabId] = {
+          url, headers, body: null, pageUrl: details.documentUrl || '',
+          requestId: 'wr_' + details.requestId,
+          source: 'webrequest'
+        };
+        console.log('[DarkDM] Manifest via webRequest:', url.substring(0, 80));
+      },
+      { urls: ['<all_urls>'], types: ['xmlhttprequest', 'media', 'other', 'script'] },
+      ['requestHeaders']
+    );
+  }
+} catch(e) {}
+
+// ============================================================
 // Message handler
 // ============================================================
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
