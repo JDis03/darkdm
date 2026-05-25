@@ -4,6 +4,7 @@
 // ============================================================
 
 mod downloader;
+mod log;
 
 use downloader::*;
 
@@ -104,13 +105,22 @@ struct Response {
 }
 
 fn main() {
+    // Init debug log
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let output_dir = std::path::Path::new(&home).join(OUTPUT_DIR);
+    let _ = std::fs::create_dir_all(&output_dir);
+    log::init(&output_dir);
+    
+    log::log("DarkDM Host started");
+    
     while let Ok(msg) = read_message() {
-        eprintln!("[DarkDM] Received: {}", msg.msg_type);
+        log::log(&format!("Received: {}", msg.msg_type));
         let response = handle_message(&msg);
         if write_message(&response).is_err() {
             break;
         }
     }
+    log::log("DarkDM Host stopped");
 }
 
 fn read_message() -> io::Result<ChromeMessage> {

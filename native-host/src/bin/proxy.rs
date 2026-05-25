@@ -5,6 +5,7 @@
 // Uso: darkdm-proxy <session_name> <output_dir> [port]
 // ============================================================
 
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -20,6 +21,19 @@ const VIDEO_CONTENT_TYPES: &[&str] = &[
     "application/dash+xml", "video/mpeg",
 ];
 
+// Simple log to file
+fn proxy_log(log_path: &std::path::Path, msg: &str) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{}] [Proxy] {}\n", timestamp, msg);
+    eprint!("{}", line); // also to stderr
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -31,9 +45,11 @@ fn main() {
     let output_dir = PathBuf::from(&args[2]);
     let port: u16 = args.get(3).and_then(|p| p.parse().ok()).unwrap_or(8899);
 
+    let log_path = output_dir.join("_darkdm_debug.log");
+    
     let seg_dir = output_dir.join("_proxy_segments").join(session);
     if std::fs::create_dir_all(&seg_dir).is_err() {
-        eprintln!("[DarkDM Proxy] Failed to create output dir");
+        proxy_log(&log_path, "Failed to create output dir");
         std::process::exit(1);
     }
 
@@ -41,7 +57,7 @@ fn main() {
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[DarkDM Proxy] Failed to bind {}: {}", addr, e);
+            proxy_log(&log_path, &format!("Failed to bind {}: {}", addr, e));
             std::process::exit(1);
         }
     };
@@ -49,14 +65,13 @@ fn main() {
 
     let running = Arc::new(AtomicBool::new(true));
     let seg_count = Arc::new(AtomicU64::new(0));
+    let lp = Arc::new(log_path);
 
-    eprintln!("[DarkDM Proxy] Started on {} for session {}", addr, session);
+    proxy_log(&lp, &format!("Started on {} for session {}", addr, session));
 
     // Handle SIGTERM/SIGINT gracefully via a simple signal handler
     let r = running.clone();
     thread::spawn(move || {
-        // Just sleep and let the OS kill us when parent exits
-        // The proxy socket will close when the process is killed
         loop {
             thread::sleep(Duration::from_secs(5));
             if !r.load(Ordering::SeqCst) { break; }
@@ -71,23 +86,26 @@ fn main() {
             Ok(client) => {
                 let sd = seg_dir.clone();
                 let sc = seg_count.clone();
-                thread::spawn(move || handle_client(client, &sd, &sc));
+                let lp = lp.clone();
+                thread::spawn(move || handle_client(client, &sd, &sc, &lp));
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(e) => {
-                eprintln!("[DarkDM Proxy] Accept error: {}", e);
+                proxy_log(&lp, &format!("Accept error: {}", e));
             }
         }
     }
+    
+    proxy_log(&lp, &format!("Stopped. {} segments.", seg_count.load(Ordering::SeqCst)));
 
     eprintln!("[DarkDM Proxy] Stopped. {} segments captured.", seg_count.load(Ordering::SeqCst));
 }
 
 
 
-fn handle_client(mut client: TcpStream, seg_dir: &std::path::Path, seg_count: &Arc<AtomicU64>) {
+fn handle_client(mut client: TcpStream, seg_dir: &std::path::Path, seg_count: &Arc<AtomicU64>, log_path: &std::path::Path) {
     let mut buf = [0u8; 16384];
     let mut request = Vec::new();
 
@@ -133,9 +151,19 @@ fn handle_client(mut client: TcpStream, seg_dir: &std::path::Path, seg_count: &A
         eprintln!("[DarkDM Proxy] Transparent: {} -> {}", parts[1], target);
     }
 
+    // Log ALL requests to debug (not just video)
+    proxy_log(log_path, &format!("REQ: {} {}", method, target.split('?').next().unwrap_or(&target).chars().take(120).collect::<String>()));
+    
+    if method != "CONNECT" && !target.starts_with("http://") {
+        proxy_log(log_path, &format!("  -> Non-HTTP request, skipping save"));
+    }
+
     let parsed_url = match url::Url::parse(&target) {
         Ok(u) => u,
-        Err(_) => return,
+        Err(_) => {
+            proxy_log(log_path, &format!("  -> Failed to parse URL"));
+            return;
+        },
     };
 
     let host = parsed_url.host_str().unwrap_or("").to_string();
@@ -203,6 +231,8 @@ fn handle_client(mut client: TcpStream, seg_dir: &std::path::Path, seg_count: &A
 
     // Forward headers to client
     if client.write_all(&resp_headers).is_err() { return; }
+
+    proxy_log(log_path, &format!("  -> {} is_video={} len={}", target.split('?').next().unwrap_or(&target).chars().take(80).collect::<String>(), is_video, content_length));
 
     // Read and forward/save body
     if is_video {
