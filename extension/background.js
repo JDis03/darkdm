@@ -73,31 +73,89 @@ try {
     });
 } catch(e) {}
 
-// Message handler
+// Message handler — soporta respuestas asíncronas
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab?.id;
   switch (msg.type) {
     case 'CONNECTION_STATUS':
       sn({type:'PING'}).then(r => sendResponse({connected: r !== null}));
       return true;
+
     case 'START_DOWNLOAD':
       sn({type:'START_DOWNLOAD', url: msg.url, filename: msg.filename, tab_id: tabId});
       break;
+
     case 'VIDEO_DETECTED':
     case 'MEDIA_STREAM':
       sn({type:'STREAM_DETECTED', url: msg.url, tab_id: tabId});
       break;
+
     case 'EXTRACT_PAGE':
-      sn({type:'EXTRACT_PAGE', url: msg.url, title: msg.title, tab_id: tabId});
-      break;
+      // Enviar a native host (yt-dlp con cookies)
+      sn({type:'EXTRACT_PAGE', url: msg.url, title: msg.title, tab_id: tabId, 
+          site: msg.site, hasDrm: msg.hasDrm})
+        .then(resp => {
+          const success = resp && (resp.msg_type === 'DOWNLOAD_STARTED' || resp.msg_type === 'DOWNLOAD_RESULT') && resp.success;
+          sendResponse({success: !!success, msg: resp?.message || 'No response'});
+        })
+        .catch(() => sendResponse({success: false, msg: 'Native host not reachable'}));
+      return true;
+
+    case 'TAB_CAPTURE':
+      // Fallback: chrome.tabCapture para sitios con DRM
+      chrome.tabCapture.capture({ video: true, audio: true }, stream => {
+        if (chrome.runtime.lastError || !stream) {
+          sendResponse({success: false, error: chrome.runtime.lastError?.message || 'No stream'});
+          return;
+        }
+        // Iniciar grabación en background
+        try {
+          const mt = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') 
+            ? 'video/webm;codecs=vp9,opus' : 'video/webm';
+          const rec = new MediaRecorder(stream, { mimeType: mt, videoBitsPerSecond: 8000000 });
+          const parts = [];
+          rec.ondataavailable = e => { if (e.data?.size > 1000) parts.push(e.data); };
+          rec.onstop = () => {
+            stream.getTracks().forEach(t => t.stop());
+            if (parts.length) {
+              const blob = new Blob(parts, { type: mt });
+              const url = URL.createObjectURL(blob);
+              const fname = msg.filename || ('tab_capture_' + Date.now() + '.webm');
+              chrome.downloads.download({ url, filename: 'DarkDM/' + fname, saveAs: false });
+              setTimeout(() => URL.revokeObjectURL(url), 10000);
+            }
+          };
+          rec.start(15000);
+          sendResponse({success: true, recording: true});
+        } catch(e) {
+          sendResponse({success: false, error: e.message});
+        }
+      });
+      return true;
+
     case 'BUFFER_CAPTURE':
-      // captureStream started in content script
       break;
+
     case 'SAVE_FILE':
       try { chrome.downloads.download({url: msg.data, filename: 'DarkDM/' + msg.filename, saveAs: false}); } catch(e) {}
       break;
+
     case 'ATTACH_DEBUGGER':
       if (tabId) attachDebugger(tabId);
       break;
+  }
+});
+
+// ============================================================
+// Auto: detectar DRM y extraer con yt-dlp al cargar página
+// ============================================================
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.url) {
+    // Si es un sitio DRM conocido, intentar attach debugger automáticamente
+    const drmSites = ['netflix.com', 'primevideo.com', 'disneyplus.com', 'hbomax.com', 
+                       'max.com', 'hulu.com', 'paramountplus.com', 'tv.apple.com'];
+    if (drmSites.some(s => tab.url.includes(s))) {
+      setTimeout(() => attachDebugger(tabId), 2000);
+    }
   }
 });

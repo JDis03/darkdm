@@ -1,10 +1,10 @@
 // ============================================================
-// DarkDM v3 — 3 niveles como IDM
-// N1: Network → N2: Native → N3: MediaSource Buffer
+// DarkDM v4 — 4 niveles (IDM-style with DRM support)
+// N1: Direct URL → N2: captureStream → N3: yt-dlp (EME/DRM) → N4: Display Capture
 // ============================================================
 (function() {
 'use strict';
-console.log('[DarkDM] v3 loaded');
+console.log('[DarkDM] v4 loaded');
 
 var overlay = null, currentVideo = null, hideTimer = null;
 var mseBuffer = [], mseCapturing = false;
@@ -92,6 +92,29 @@ function isRealVideoUrl(url) {
 }
 
 // ============================================================
+// EME / DRM Detection
+// ============================================================
+function isEMEProtected(video) {
+  try {
+    return video.mediaKeys !== null && video.mediaKeys !== undefined;
+  } catch(e) { return false; }
+}
+
+function getHostname() {
+  try { return location.hostname.toLowerCase(); } catch(e) { return ''; }
+}
+
+function isDRMSite() {
+  var host = getHostname();
+  return host.includes('netflix') || host.includes('primevideo') ||
+         host.includes('disney') || host.includes('hbomax') ||
+         host.includes('hbo') || host.includes('max.com') ||
+         host.includes('peacock') || host.includes('hulu') ||
+         host.includes('paramount') || host.includes('apple.tv') ||
+         host.includes('tv.apple');
+}
+
+// ============================================================
 // OVERLAY
 // ============================================================
 function createOverlay(v) {
@@ -140,7 +163,7 @@ function showStatus(msg, type) {
 function hideStatus() { if (panel) panel.style.display = 'none'; }
 
 // ============================================================
-// CAPTURE ENGINE — 3 niveles como IDM
+// CAPTURE ENGINE — 4 niveles como IDM
 // ============================================================
 function doCapture(video) {
   var src = getVideoSource(video);
@@ -159,11 +182,18 @@ function doCapture(video) {
     return;
   }
 
-  // captureStream directo con guardado automático cada 30s
+  // N3: DRM / EME detection → yt-dlp con cookies del navegador
+  if (isEMEProtected(video) || isDRMSite()) {
+    console.log('[DarkDM] EME/DRM detected, using yt-dlp extraction');
+    doEMECapture(video);
+    return;
+  }
+
+  // N2: captureStream directo
   doCaptureStream(video);
 }
 
-// Fallback: captureStream con guardado automático cada 30s
+// N2: captureStream con guardado automático cada 30s
 function doCaptureStream(video) {
   if (!video.captureStream || video.paused) return;
   try {
@@ -189,9 +219,7 @@ function doCaptureStream(video) {
     
     rec.onstop = function() {
       video.removeEventListener('ended', onVideoEnd);
-      overlay.textContent = '⬇️ DarkDM';
-      overlay.style.borderColor = '#FF6B35';
-      overlay.onclick = function(e3) { e3.stopPropagation(); e3.preventDefault(); doCapture(video); };
+      restoreOverlayToNormal(video);
       if (allParts.length) {
         var blob = new Blob(allParts, { type: mt });
         var fname = baseName + '_completa.webm';
@@ -217,7 +245,127 @@ function doCaptureStream(video) {
       e2.stopPropagation(); e2.preventDefault();
       if (rec.state !== 'inactive') rec.stop();
     };
-  } catch(e) { console.error('[DarkDM] captureStream error:', e); }
+  } catch(e) {
+    console.error('[DarkDM] captureStream error:', e);
+    // Si falla por EME, intentar DRM route
+    if (e.name === 'NotSupportedError' && isEMEProtected(video)) {
+      doEMECapture(video);
+    } else {
+      showStatus('❌ Error: ' + e.message, 'error');
+    }
+  }
+}
+
+// N3: EME/DRM → yt-dlp con cookies del navegador (como IDM site grabber)
+function doEMECapture(video) {
+  var url = location.href;
+  var title = document.title;
+
+  showStatus('🔒 <b>DRM detectado</b><br>Extrayendo con yt-dlp...<br><span style="font-size:11px;color:#aaa">Usa las cookies de tu sesión</span>');
+
+  // Enviar al native host para extracción con yt-dlp + cookies
+  try {
+    chrome.runtime.sendMessage({
+      type: 'EXTRACT_PAGE',
+      url: url,
+      title: title.substring(0, 100),
+      hasDrm: true,
+      site: getHostname()
+    }, function(resp) {
+      if (resp && resp.success) {
+        showStatus('✅ <b>Descarga iniciada</b><br>Verifica en ~/Descargas/DarkDM/', 'success');
+      } else {
+        // Si yt-dlp falla, ofrecer captura de pantalla como respaldo
+        showStatus('⚠️ <b>yt-dlp no pudo extraer</b><br>Usa "🖥️ Pantalla" como respaldo', 'error');
+        setupDisplayFallback(video);
+      }
+    });
+  } catch(e) {
+    showStatus('❌ Error al conectar con el host', 'error');
+  }
+}
+
+// N4: Captura de pantalla (getDisplayMedia) — funciona con TODO
+function doDisplayCapture(video) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    showStatus('❌ Captura de pantalla no soportada en este navegador', 'error');
+    return;
+  }
+
+  showStatus('🖥️ <b>Selecciona la ventana/pestaña</b><br>Elige la del video en el diálogo');
+
+  navigator.mediaDevices.getDisplayMedia({
+    video: { width: 1920, height: 1080, frameRate: 30 },
+    audio: true
+  }).then(function(displayStream) {
+    var baseName = (document.title || 'video').replace(/[^a-zA-Z0-9]/g,'_').substring(0,50);
+    var mt = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' : 'video/webm';
+    var rec = new MediaRecorder(displayStream, { mimeType: mt, videoBitsPerSecond: 8000000 });
+    var allParts = [];
+
+    showStatus('🖥️ <b>Grabando pantalla...</b><br><span style="font-size:11px;color:#aaa">Se guarda automáticamente</span><br><span style="color:#FF6B35;font-size:11px">⏹️ Clic para detener</span>');
+
+    rec.ondataavailable = function(e) {
+      if (e.data.size && e.data.size > 1000) {
+        allParts.push(e.data);
+        var totalMB = 0;
+        for (var i = 0; i < allParts.length; i++) totalMB += allParts[i].size;
+        showStatus('🖥️ <b>Grabando...</b><br><span style="font-size:11px;color:#aaa">' + (totalMB/1048576).toFixed(0) + 'MB</span><br><span style="color:#FF6B35;font-size:11px">⏹️ Clic para detener</span>');
+      }
+    };
+
+    rec.onstop = function() {
+      displayStream.getTracks().forEach(function(t) { t.stop(); });
+      if (allParts.length) {
+        var blob = new Blob(allParts, { type: mt });
+        var fname = baseName + '_pantalla.webm';
+        var blobUrl = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = blobUrl; a.download = fname; a.style.display = 'none';
+        document.body.appendChild(a); a.click();
+        setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(blobUrl); }, 5000);
+        showStatus('✅ Captura guardada: ' + (blob.size/1048576).toFixed(0) + 'MB', 'success');
+      }
+      setTimeout(hideStatus, 5000);
+      restoreOverlayToNormal(video);
+    };
+
+    rec.start(10000); // 10s por chunk
+
+    overlay.textContent = '🖥️ Grabando...';
+    overlay.style.borderColor = '#FF9800';
+    overlay.onclick = function(e2) {
+      e2.stopPropagation(); e2.preventDefault();
+      if (rec.state !== 'inactive') rec.stop();
+    };
+
+    // Detener si se cierra el stream (el usuario hace clic en "Detener compartir")
+    displayStream.getVideoTracks()[0].onended = function() {
+      if (rec.state !== 'inactive') rec.stop();
+    };
+  }).catch(function(err) {
+    if (err.name === 'NotAllowedError') {
+      showStatus('❌ Captura cancelada por el usuario', 'error');
+    } else {
+      showStatus('❌ Error: ' + err.message, 'error');
+    }
+    setTimeout(hideStatus, 4000);
+  });
+}
+
+function setupDisplayFallback(video) {
+  overlay.textContent = '🖥️ Pantalla';
+  overlay.style.borderColor = '#FF9800';
+  overlay.onclick = function(e) {
+    e.stopPropagation(); e.preventDefault();
+    doDisplayCapture(video);
+  };
+}
+
+function restoreOverlayToNormal(video) {
+  overlay.textContent = '⬇️ DarkDM';
+  overlay.style.borderColor = '#FF6B35';
+  overlay.onclick = function(e) { e.stopPropagation(); e.preventDefault(); doCapture(video); };
 }
 
 // ============================================================

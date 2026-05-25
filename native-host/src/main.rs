@@ -324,7 +324,7 @@ fn error_response(msg: &str) -> Response {
     }
 }
 
-/// Extract video from complex sites using yt-dlp
+/// Extract video from complex sites using yt-dlp (Netflix, Prime, etc.)
 fn extract_with_ytdlp(url: &str, output_dir: &Path) -> Result<String, String> {
     if !which("yt-dlp") {
         return Err("yt-dlp not found. Install it: https://github.com/yt-dlp/yt-dlp".to_string());
@@ -332,50 +332,107 @@ fn extract_with_ytdlp(url: &str, output_dir: &Path) -> Result<String, String> {
 
     let filename = format!("darkdm_ytdlp_%(title)s_%(id)s.%(ext)s");
     let output_template = output_dir.join(&filename);
+    let template_str = output_template.to_string_lossy().to_string();
     
-    // Try to get cookies from the browser for authenticated content (Netflix, etc.)
+    // Cookies from browser (Netflix, Prime, etc. require auth)
     let cookies_arg = format!("--cookies-from-browser={}", get_browser_name());
 
-    let status = Command::new("yt-dlp")
+    eprintln!("[DarkDM] Running yt-dlp for: {}", url);
+    eprintln!("[DarkDM] yt-dlp args: -o {} --impersonate chrome {} --cookies-from-browser={}", 
+              template_str, url, get_browser_name());
+
+    let output = Command::new("yt-dlp")
         .args([
-            "-o", &output_template.to_string_lossy(),
+            "-o", &template_str,
             "--no-playlist",
             "--limit-rate", "50M",
             "--concurrent-fragments", "8",
             "--impersonate", "chrome",
             &cookies_arg,
-            "--no-warnings",
+            "--verbose",
             url,
         ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
         .map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
 
-    if status.success() {
-        Ok(output_dir.join("darkdm_video.mp4").to_string_lossy().to_string())
+    if output.status.success() {
+        // Find the actual output file
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let actual_file = find_ytdlp_output(&stderr, output_dir);
+        eprintln!("[DarkDM] yt-dlp OK: {:?}", actual_file);
+        Ok(actual_file.unwrap_or_else(|| {
+            output_dir.join("darkdm_video.mp4").to_string_lossy().to_string()
+        }))
     } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("[DarkDM] yt-dlp failed (1st attempt with cookies): {}", stderr);
+
         // Retry without cookies (for public sites)
-        let status2 = Command::new("yt-dlp")
+        let output2 = Command::new("yt-dlp")
             .args([
-                "-o", &output_template.to_string_lossy(),
+                "-o", &template_str,
                 "--no-playlist",
                 "--concurrent-fragments", "8",
                 "--impersonate", "chrome",
-                "--no-warnings",
                 url,
             ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
             .map_err(|e| format!("yt-dlp retry failed: {}", e))?;
 
-        if status2.success() {
-            Ok(output_dir.join("darkdm_video.mp4").to_string_lossy().to_string())
+        if output2.status.success() {
+            let stderr2 = String::from_utf8_lossy(&output2.stderr);
+            let actual_file = find_ytdlp_output(&stderr2, output_dir);
+            eprintln!("[DarkDM] yt-dlp OK (no cookies): {:?}", actual_file);
+            Ok(actual_file.unwrap_or_else(|| {
+                output_dir.join("darkdm_video.mp4").to_string_lossy().to_string()
+            }))
         } else {
-            Err("yt-dlp extraction failed. Try manually: yt-dlp --cookies-from-browser vivaldi <URL>".to_string())
+            let err2 = String::from_utf8_lossy(&output2.stderr);
+            eprintln!("[DarkDM] yt-dlp failed both attempts: {}", err2);
+            Err(format!("yt-dlp extraction failed.\nTry manually:\nyt-dlp --cookies-from-browser {} \"{}\"\nError: {}", 
+                       get_browser_name(), url, extract_error(&err2)))
         }
     }
+}
+
+/// Try to extract the actual filename from yt-dlp verbose output
+fn find_ytdlp_output(stderr: &str, output_dir: &Path) -> Option<String> {
+    // Look for "[Merger] Merging formats into ..." or "[download] Destination: ..."
+    for line in stderr.lines() {
+        if line.contains("Destination:") {
+            if let Some(path) = line.split("Destination:").nth(1) {
+                let p = path.trim();
+                if !p.is_empty() && Path::new(p).exists() {
+                    return Some(p.to_string());
+                }
+            }
+        }
+        if line.contains("has already been downloaded") {
+            if let Some(path) = line.split(' ').next() {
+                let p = path.trim();
+                if !p.is_empty() && Path::new(p).exists() {
+                    return Some(p.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract a useful error message from yt-dlp output
+fn extract_error(err: &str) -> &str {
+    // Get the last meaningful line
+    for line in err.lines().rev() {
+        let l = line.trim();
+        if !l.is_empty() && !l.contains('[') && l.len() > 10 {
+            return l;
+        }
+    }
+    "See verbose output above"
 }
 
 fn get_browser_name() -> &'static str {
