@@ -17,7 +17,8 @@
     "downloads",
     "activeTab",
     "scripting",
-    "debugger"
+    "debugger",
+    "cookies"
   ],
   "host_permissions": [
     "http://*/*",

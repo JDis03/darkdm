@@ -73,6 +73,52 @@ try {
     });
 } catch(e) {}
 
+// ============================================================
+// Extract cookies from a domain and forward to native host
+// (Solves Vivaldi encrypted cookies issue)
+// ============================================================
+function cookiesToNetscape(cookies) {
+  return '# Netscape HTTP Cookie File\n' +
+    cookies.map(c => {
+      const exp = Math.floor(c.expirationDate || 4102444800);
+      const domain = c.domain.startsWith('.') ? c.domain : '.' + c.domain;
+      return `${domain}\tTRUE\t${c.path}\t${c.secure ? 'TRUE' : 'FALSE'}\t${exp}\t${c.name}\t${c.value}`;
+    }).join('\n');
+}
+
+function handleExtractPage(msg, tabId, sendResponse) {
+  try {
+    const url = new URL(msg.url);
+    const domain = url.hostname;
+    
+    // Get cookies from the extension API (they're already decrypted)
+    chrome.cookies.getAll({ domain }, cookieList => {
+      if (chrome.runtime.lastError || !cookieList || cookieList.length === 0) {
+        // No cookies found via API — maybe need different domain or fallback
+        console.log('[DarkDM] No cookies from API for', domain);
+        // Still try with empty cookies — yt-dlp might work for some sites
+      }
+      
+      const cookieStr = cookieList?.length ? cookiesToNetscape(cookieList) : '';
+      console.log(`[DarkDM] Got ${cookieList?.length || 0} cookies for ${domain}`);
+      
+      // Send to native host with cookies
+      sn({type:'EXTRACT_PAGE', url: msg.url, title: msg.title, tab_id: tabId, 
+          site: msg.site, hasDrm: msg.hasDrm, cookies: cookieStr})
+        .then(resp => {
+          const success = resp && (['DOWNLOAD_STARTED','DOWNLOAD_RESULT'].includes(resp.msg_type) && resp.success);
+          const errMsg = resp?.error || resp?.message || 'Sin respuesta del host nativo';
+          sendResponse({success: !!success, msg: success ? (resp?.message || 'OK') : errMsg});
+        })
+        .catch(() => sendResponse({success: false, msg: 'Host nativo no disponible'}));
+    });
+  } catch (e) {
+    console.error('[DarkDM] handleExtractPage error:', e);
+    sendResponse({success: false, msg: 'Error: ' + e.message});
+  }
+  return true; // Keep channel open for async response
+}
+
 // Message handler — soporta respuestas asíncronas
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab?.id;
@@ -91,15 +137,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
 
     case 'EXTRACT_PAGE':
-      sn({type:'EXTRACT_PAGE', url: msg.url, title: msg.title, tab_id: tabId, 
-          site: msg.site, hasDrm: msg.hasDrm})
-        .then(resp => {
-          const success = resp && (['DOWNLOAD_STARTED','DOWNLOAD_RESULT'].includes(resp.msg_type) && resp.success);
-          const errMsg = resp?.error || resp?.message || 'Sin respuesta del host nativo';
-          sendResponse({success: !!success, msg: success ? (resp?.message || 'OK') : errMsg});
-        })
-        .catch(() => sendResponse({success: false, msg: 'Host nativo no disponible'}));
-      return true;
+      return handleExtractPage(msg, tabId, sendResponse);
 
     case 'BUFFER_CAPTURE':
       break;

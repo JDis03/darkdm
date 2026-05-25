@@ -25,6 +25,7 @@ struct ChromeMessage {
     tab_id: Option<u64>,
     page_url: Option<String>,
     page_title: Option<String>,
+    cookies: Option<String>,        // Netscape cookie string from extension
     #[serde(flatten)]
     extra: std::collections::HashMap<String, serde_json::Value>,
 }
@@ -208,8 +209,9 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 .and_then(|v| v.as_bool()).unwrap_or(false);
             let site = msg.extra.get("site")
                 .and_then(|v| v.as_str()).unwrap_or("");
+            let cookies = msg.cookies.as_deref().unwrap_or("");
             
-            match extract_with_ytdlp(&url, &output_dir, has_drm, site) {
+            match extract_with_ytdlp(&url, &output_dir, has_drm, site, cookies) {
                 Ok(path) => Response {
                     msg_type: "DOWNLOAD_STARTED".to_string(),
                     success: Some(true), error: None,
@@ -295,12 +297,23 @@ fn launch_direct_download(url: &str, filename: &str, output_dir: &Path) -> Resul
 }
 
 fn which(name: &str) -> bool {
-    std::env::var("PATH")
-        .map(|path| {
-            path.split(':')
-                .any(|dir| Path::new(&format!("{}/{}", dir, name)).exists())
-        })
-        .unwrap_or(false)
+    find_binary(name).is_some()
+}
+
+/// Find a binary, checking the DarkDM venv first
+fn find_binary(name: &str) -> Option<String> {
+    // Check DarkDM venv first (has curl_cffi for impersonation)
+    let home = std::env::var("HOME").unwrap_or_default();
+    let venv_path = format!("{}/.local/share/darkdm/venv/bin/{}", home, name);
+    if Path::new(&venv_path).exists() {
+        return Some(venv_path);
+    }
+    // Fall back to PATH
+    std::env::var("PATH").ok().and_then(|path| {
+        path.split(':')
+            .find(|dir| Path::new(&format!("{}/{}", dir, name)).exists())
+            .map(|dir| format!("{}/{}", dir, name))
+    })
 }
 
 fn chrono_name() -> String {
@@ -330,44 +343,65 @@ fn error_response(msg: &str) -> Response {
 }
 
 /// Extract video from complex sites using yt-dlp (Netflix, Prime, etc.)
-fn extract_with_ytdlp(url: &str, output_dir: &Path, has_drm: bool, site: &str) -> Result<String, String> {
-    if !which("yt-dlp") {
+fn extract_with_ytdlp(url: &str, output_dir: &Path, has_drm: bool, site: &str, cookies: &str) -> Result<String, String> {
+    // Find yt-dlp (prefer venv which has curl_cffi for impersonation)
+    let ytdlp_path = find_binary("yt-dlp").unwrap_or_else(|| "yt-dlp".to_string());
+    if !Path::new(&ytdlp_path).exists() {
         return Err("yt-dlp not found. Install it: https://github.com/yt-dlp/yt-dlp".to_string());
     }
 
     let filename = format!("darkdm_ytdlp_%(title)s_%(id)s.%(ext)s");
     let output_template = output_dir.join(&filename);
     let template_str = output_template.to_string_lossy().to_string();
-    
-    // Cookies from browser (Netflix, Prime, etc. require auth)
-    let cookies_arg = format!("--cookies-from-browser={}", get_browser_name());
 
-    eprintln!("[DarkDM] Running yt-dlp for: {} (drm={}, site={})", url, has_drm, site);
+    eprintln!("[DarkDM] Running yt-dlp at {} for: {} (drm={}, site={})", ytdlp_path, url, has_drm, site);
+
+    // Write cookies from extension to a temp file (extension cookies > browser cookies)
+    let cookies_file = if !cookies.is_empty() {
+        let path = output_dir.join("_darkdm_cookies.txt");
+        if std::fs::write(&path, cookies).is_ok() {
+            eprintln!("[DarkDM] Wrote {} cookies to temp file", cookies.lines().count());
+            Some(path)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Build base args
-    let mut args: Vec<&str> = vec![
-        "-o", &template_str,
-        "--no-playlist",
-        "--limit-rate", "50M",
-        "--concurrent-fragments", "8",
+    let mut args: Vec<String> = vec![
+        "-o".to_string(), template_str.clone(),
+        "--no-playlist".to_string(),
+        "--limit-rate".to_string(), "50M".to_string(),
+        "--concurrent-fragments".to_string(), "8".to_string(),
     ];
 
-    // For DRM sites, add impersonation + cookies + format selection
-    // (Netflix needs specific format/flags vs normal sites)
-    if has_drm || !site.is_empty() {
-        args.extend_from_slice(&["--impersonate", "chrome"]);
-        args.push(&cookies_arg);
-        // DRM sites often benefit from merging best video+audio
-        args.extend_from_slice(&["-f", "bestvideo+bestaudio/best"]);
-    } else {
-        args.extend_from_slice(&["--impersonate", "chrome"]);
+    // Use cookies if available (from extension API — already decrypted)
+    if let Some(ref cpath) = cookies_file {
+        let cpath_str = cpath.to_string_lossy().to_string();
+        args.push("--cookies".to_string());
+        args.push(cpath_str);
     }
-    args.push("--verbose");
-    args.push(url);
+
+    // DRM sites: impersonation + best format
+    if has_drm || !site.is_empty() {
+        args.extend_from_slice(&[
+            "-f".to_string(), "bestvideo+bestaudio/best".to_string(),
+            "--impersonate".to_string(), "chrome-131".to_string(),
+        ]);
+    } else {
+        // Non-DRM sites: basic impersonation
+        args.push("--impersonate".to_string());
+        args.push("chrome-131".to_string());
+    }
+
+    args.push("--verbose".to_string());
+    args.push(url.to_string());
 
     eprintln!("[DarkDM] yt-dlp args: {:?}", args);
 
-    let output = Command::new("yt-dlp")
+    let output = Command::new(&ytdlp_path)
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -386,19 +420,19 @@ fn extract_with_ytdlp(url: &str, output_dir: &Path, has_drm: bool, site: &str) -
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!("[DarkDM] yt-dlp failed (1st attempt with cookies): {}", stderr);
 
-        // Retry without cookies (for public sites)
-        let mut retry_args: Vec<&str> = vec![
-            "-o", &template_str,
-            "--no-playlist",
-            "--concurrent-fragments", "8",
-            "--impersonate", "chrome",
+        // Retry without cookies (for public sites, still use venv yt-dlp + impersonation)
+        let mut retry_args: Vec<String> = vec![
+            "-o".to_string(), template_str.clone(),
+            "--no-playlist".to_string(),
+            "--concurrent-fragments".to_string(), "8".to_string(),
+            "--impersonate".to_string(), "chrome-131".to_string(),
         ];
         if has_drm {
-            retry_args.extend_from_slice(&["-f", "bestvideo+bestaudio/best"]);
+            retry_args.extend_from_slice(&["-f".to_string(), "bestvideo+bestaudio/best".to_string()]);
         }
-        retry_args.push(url);
+        retry_args.push(url.to_string());
 
-        let output2 = Command::new("yt-dlp")
+        let output2 = Command::new(&ytdlp_path)
             .args(&retry_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -415,8 +449,8 @@ fn extract_with_ytdlp(url: &str, output_dir: &Path, has_drm: bool, site: &str) -
         } else {
             let err2 = String::from_utf8_lossy(&output2.stderr);
             eprintln!("[DarkDM] yt-dlp failed both attempts: {}", err2);
-            Err(format!("yt-dlp extraction failed.\nTry manually:\nyt-dlp --cookies-from-browser {} \"{}\"\nError: {}", 
-                       get_browser_name(), url, extract_error(&err2)))
+            Err(format!("yt-dlp extraction failed.\nExport cookies manually and run:\nyt-dlp --cookies cookies.txt --impersonate chrome-131 \"{}\"\nError: {}", 
+                       url, extract_error(&err2)))
         }
     }
 }
