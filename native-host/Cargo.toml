@@ -12,6 +12,10 @@ path = "src/main.rs"
 name = "darkdm-proxy"
 path = "src/bin/proxy.rs"
 
+[[bin]]
+name = "darkdm-proxy-mitm"
+path = "src/bin/proxy_mitm.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
