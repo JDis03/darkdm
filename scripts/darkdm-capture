@@ -1,0 +1,176 @@
+#!/bin/bash
+# DarkDM — Captura nativa con SSLKEYLOGFILE (100% indetectable)
+# Vivaldi exporta las claves TLS, tcpdump captura, pyshark descifra
+
+set -e
+
+SESSION="darkdm_$(date +%s)"
+OUTPUT_DIR="$HOME/Descargas/DarkDM"
+KEYS_FILE="/tmp/darkdm_keys_${SESSION}.log"
+PCAP_FILE="/tmp/darkdm_capture_${SESSION}.pcap"
+SEG_DIR="${OUTPUT_DIR}/_proxy_segments/${SESSION}"
+PIDFILE="/tmp/darkdm-capture.pid"
+
+mkdir -p "$SEG_DIR"
+
+case "${1:-start}" in
+  start)
+    echo "🚀 DarkDM Capture — SSLKEYLOGFILE mode"
+    echo "Session: $SESSION"
+    echo ""
+
+    # 1) Iniciar tcpdump en background (necesita sudo)
+    echo "🔒 Iniciando captura de red (sudo)..."
+    sudo tcpdump -i any -w "$PCAP_FILE" 'tcp port 443' 2>/dev/null &
+    TCPDUMP_PID=$!
+    echo $TCPDUMP_PID > "$PIDFILE"
+    sleep 1
+    echo "   tcpdump PID $TCPDUMP_PID → $PCAP_FILE"
+
+    # 2) Exportar ruta de keys para los scripts que lo necesiten
+    echo "$KEYS_FILE" > "/tmp/darkdm_keys_path.txt"
+    echo "$PCAP_FILE" > "/tmp/darkdm_pcap_path.txt"
+    echo "$SEG_DIR" > "/tmp/darkdm_segdir_path.txt"
+
+    echo ""
+    echo "✅ Captura lista. Abre Vivaldi con:"
+    echo ""
+    echo "   SSLKEYLOGFILE=${KEYS_FILE} vivaldi"
+    echo ""
+    echo "   O mejor: darkdm-vivaldi"
+
+    # Guardar el comando para la terminal
+    echo "SSLKEYLOGFILE=${KEYS_FILE} vivaldi" > /tmp/darkdm_vivaldi_cmd.sh
+    chmod +x /tmp/darkdm_vivaldi_cmd.sh
+    ;;
+
+  stop)
+    echo "🛑 Deteniendo captura..."
+    
+    # Matar tcpdump
+    if [ -f "$PIDFILE" ]; then
+      PID=$(cat "$PIDFILE")
+      sudo kill $PID 2>/dev/null || true
+      rm -f "$PIDFILE"
+      echo "   tcpdump detenido"
+    fi
+    sleep 1
+
+    # 3) Extraer segmentos .ts del PCAP
+    echo "📦 Extrayendo segmentos .ts del tráfico capturado..."
+    
+    if [ -f "$KEYS_FILE" ] && [ -s "$PCAP_FILE" ]; then
+      ~/.local/share/darkdm/venv/bin/python3 - "$PCAP_FILE" "$KEYS_FILE" "$SEG_DIR" << 'PYEOF'
+import sys, os, struct
+
+PCAP = sys.argv[1]
+KEYLOG = sys.argv[2]
+OUT_DIR = sys.argv[3]
+
+def is_ts_segment(data: bytes) -> bool:
+    """Detecta MPEG-TS por sync byte 0x47 cada 188 bytes"""
+    if len(data) < 188: return False
+    if data[0] != 0x47: return False
+    if len(data) >= 376 and data[376] != 0x47: return False
+    return True
+
+def extract_http2_data(pcap_path, keylog_path, out_dir):
+    """Extrae DATA frames HTTP/2 del PCAP usando las keys TLS"""
+    try:
+        import pyshark
+        cap = pyshark.FileCapture(
+            pcap_path,
+            override_prefs={"tls.keylog_file": keylog_path},
+            display_filter="http2.data"
+        )
+        count = 0
+        for i, pkt in enumerate(cap):
+            try:
+                if hasattr(pkt, 'http2') and hasattr(pkt.http2, 'data_data'):
+                    raw = pkt.http2.data_data.replace(':', '')
+                    data = bytes.fromhex(raw)
+                    if len(data) > 50000 and is_ts_segment(data):
+                        fname = os.path.join(out_dir, f"seg{count:05d}.ts")
+                        with open(fname, 'wb') as f:
+                            f.write(data)
+                        count += 1
+                        if count % 10 == 0:
+                            print(f"   → {count} segmentos...")
+            except (AttributeError, ValueError):
+                pass
+        cap.close()
+        return count
+    except ImportError:
+        print("   ⚠️ pyshark no instalado. Usando método alternativo...")
+        return extract_ts_from_raw(pcap_path, out_dir)
+
+def extract_ts_from_raw(pcap_path, out_dir):
+    """Método alternativo: busca 0x47 sync byte en bruto"""
+    count = 0
+    with open(pcap_path, 'rb') as f:
+        data = f.read()
+    
+    # Buscar patrones de segmentos TS (grandes bloques con sync bytes)
+    i = 0
+    while i < len(data):
+        if data[i] == 0x47 and i + 188 < len(data):
+            # Posible inicio de segmento
+            start = i
+            # Avanzar hasta encontrar datos no-TS
+            while i < len(data):
+                if i + 188 < len(data) and data[i] == 0x47:
+                    i += 188
+                else:
+                    break
+            size = i - start
+            if size > 100000:  # > ~100KB
+                fname = os.path.join(out_dir, f"seg{count:05d}.ts")
+                with open(fname, 'wb') as f:
+                    f.write(data[start:i])
+                count += 1
+                if count % 10 == 0:
+                    print(f"   → {count} segmentos...")
+        else:
+            i += 1
+    return count
+
+# Verificar pyshark (debe estar instalado en el venv)
+try:
+    import pyshark
+except ImportError:
+    print("   ⚠️ pyshark no instalado. Ejecuta:")
+    print("   uv pip install --python ~/.local/share/darkdm/venv/bin/python3 pyshark")
+    print("   Usando método alternativo...")
+    return extract_ts_from_raw(pcap_path, out_dir)
+
+count = extract_http2_data(PCAP, KEYLOG, OUT_DIR)
+if count == 0:
+    count = extract_ts_from_raw(PCAP, OUT_DIR)
+
+print(f"\n✅ {count} segmentos extraídos en {OUT_DIR}")
+with open(os.path.join(OUT_DIR, "..", "..", "_darkdm_debug.log"), "a") as log:
+    import time
+    log.write(f"[{int(time.time())}] [Capture] {count} segments extracted\n")
+
+PYEOF
+    else
+      echo "   ⚠️ No se encontraron archivos de captura"
+    fi
+
+    # Limpiar temporales
+    rm -f "$KEYS_FILE" "$PCAP_FILE" "/tmp/darkdm_keys_path.txt" \
+          "/tmp/darkdm_pcap_path.txt" "/tmp/darkdm_segdir_path.txt" \
+          "/tmp/darkdm_vivaldi_cmd.sh"
+
+    echo ""
+    echo "✅ Captura finalizada. Segmentos en: $SEG_DIR"
+    ;;
+
+  *)
+    echo "Uso: darkdm-capture [start|stop]"
+    echo ""
+    echo "  start  — Inicia tcpdump + prepara SSLKEYLOGFILE"
+    echo "  stop   — Detiene y extrae segmentos .ts del PCAP"
+    exit 1
+    ;;
+esac

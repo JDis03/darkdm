@@ -1,0 +1,23 @@
+#!/bin/bash
+# DarkDM — Lanza Vivaldi con SSLKEYLOGFILE (captura TLS nativa)
+# El CDN no detecta nada — es TLS 100% nativo de Vivaldi
+
+SESSION="darkdm_$(date +%s)"
+KEYS_FILE="/tmp/darkdm_keys_${SESSION}.log"
+
+# Si darkdm-capture ya está corriendo, usar su keys file
+if [ -f "/tmp/darkdm_keys_path.txt" ]; then
+  KEYS_FILE=$(cat /tmp/darkdm_keys_path.txt)
+  echo "📡 Usando captura activa de darkdm-capture"
+else
+  echo "⚠️  darkdm-capture no está corriendo."
+  echo "   Los segmentos NO se guardarán automáticamente."
+  echo "   Ejecuta primero: darkdm-capture start"
+  echo ""
+fi
+
+echo "🚀 Lanzando Vivaldi con SSLKEYLOGFILE..."
+echo "   Keys: $KEYS_FILE"
+echo ""
+
+SSLKEYLOGFILE="$KEYS_FILE" exec vivaldi "$@"

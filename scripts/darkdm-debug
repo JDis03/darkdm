@@ -1,0 +1,14 @@
+#!/bin/bash
+# DarkDM Debug — Muestra logs del proxy y host nativo
+LOG="$HOME/Descargas/DarkDM/_darkdm_debug.log"
+
+echo -e "\033[1;36m━━━ DarkDM Debug ━━━\033[0m"
+echo -e "\033[2mCtrl+C para salir\033[0m\n"
+
+if [ ! -f "$LOG" ]; then
+    echo "No hay logs aún. Activa el proxy primero."
+    echo "Esperando logs..."
+    touch "$LOG"
+fi
+
+tail -f "$LOG" 2>/dev/null || echo "No se puede leer $LOG"
