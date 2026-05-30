@@ -395,16 +395,15 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 
                 let mut ytdlp_cmd = Command::new(&ytdlp_path);
                 
-                // Ensure we get best quality
+                // NO YouTube format flags (-f, --format-sort, --merge-output-format).
+                // For generic HLS (pelisjuanita, etc) the stream is already multiplexed.
+                // YouTube-specific flags cause duplication (326 MB vs 303 MB).
                 ytdlp_cmd.args(["-o", &output_str, "--no-playlist", 
                                "--concurrent-fragments", "8",
                                "--impersonate", "chrome-131",
                                "--limit-rate", "50M",
                                "--hls-use-mpegts",
                                "--hls-prefer-native",
-                               "-f", "bv*+ba/b",
-                               "--format-sort", "res:1080,codec:av1:nvdec:hevc:h264,br",
-                               "--merge-output-format", "mp4",
                                &manifest_url]);
                 
                 if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
