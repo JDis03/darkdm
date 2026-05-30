@@ -4,71 +4,14 @@
 // ============================================================
 
 mod downloader;
-mod log;
 
 use downloader::*;
-
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-
-static PROXY_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
-static SUDO_PASSWORD: Mutex<String> = Mutex::new(String::new());
-static IPTABLES_DOMAINS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-fn run_iptables(action: &str, domain: &str, port: u16) -> bool {
-    let pass = SUDO_PASSWORD.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if pass.is_empty() { return false; }
-    
-    // iptables -t nat -A/D OUTPUT -p tcp -d <domain> --dport 80 -j REDIRECT --to-port <port>
-    let ipt_cmd = format!(
-        "{} -t nat -A OUTPUT -p tcp -d {} --dport 80 -j REDIRECT --to-port {}",
-        if action == "add" { "iptables" } else { "iptables -D" },
-        domain, port
-    );
-    // Redo with -D for remove
-    let ipt_cmd = if action == "remove" {
-        format!(
-            "iptables -t nat -D OUTPUT -p tcp -d {} --dport 80 -j REDIRECT --to-port {}",
-            domain, port
-        )
-    } else {
-        ipt_cmd
-    };
-    
-    eprintln!("[DarkDM] Running: sudo {}", ipt_cmd);
-    
-    let mut child = match Command::new("sudo")
-        .args(["-S", "sh", "-c", &ipt_cmd])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    
-    // Send password via stdin
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        let _ = stdin.write_all(format!("{}\n", pass).as_bytes());
-    }
-    
-    match child.wait() {
-        Ok(s) if s.success() => {
-            eprintln!("[DarkDM] iptables {} for {}: OK", action, domain);
-            true
-        },
-        _ => {
-            eprintln!("[DarkDM] iptables {} for {}: FAILED", action, domain);
-            false
-        }
-    }
-}
 
 const OUTPUT_DIR: &str = "Descargas/DarkDM";
 
@@ -105,22 +48,13 @@ struct Response {
 }
 
 fn main() {
-    // Init debug log
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let output_dir = std::path::Path::new(&home).join(OUTPUT_DIR);
-    let _ = std::fs::create_dir_all(&output_dir);
-    log::init(&output_dir);
-    
-    log::log("DarkDM Host started");
-    
     while let Ok(msg) = read_message() {
-        log::log(&format!("Received: {}", msg.msg_type));
+        eprintln!("[DarkDM] Received: {}", msg.msg_type);
         let response = handle_message(&msg);
         if write_message(&response).is_err() {
             break;
         }
     }
-    log::log("DarkDM Host stopped");
 }
 
 fn read_message() -> io::Result<ChromeMessage> {
@@ -310,66 +244,6 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             
             eprintln!("[DarkDM] DOWNLOAD_MANIFEST: {} (body: {} bytes)", manifest_url, manifest_body.len());
             
-            // Check if we have master candidates (from background.js variant detection)
-            let master_candidates: Vec<String> = msg.extra.get("master_candidates")
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                .unwrap_or_default();
-            
-            // Determine the best URL to use:
-            // If the manifest is a variant (#EXTINF but no #EXT-X-STREAM-INF), try candidates
-            let is_variant = manifest_body.contains("#EXTINF") && !manifest_body.contains("#EXT-X-STREAM-INF");
-            let mut use_url = manifest_url.clone();
-            
-            if is_variant && !master_candidates.is_empty() {
-                eprintln!("[DarkDM] Variant detected, trying {} master candidates", master_candidates.len());
-                
-                // Extract cookies from Netscape format for the candidate test
-                let cookie_header = cookies.lines()
-                    .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-                    .filter_map(|l| l.split('\t').nth(5))
-                    .zip(cookies.lines()
-                        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-                        .filter_map(|l| l.split('\t').nth(6)))
-                    .map(|(n, v)| format!("{}={}", n, v))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                
-                for candidate in &master_candidates {
-                    let mut req = ureq::get(candidate)
-                        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-                        .header("Referer", &manifest_url);
-                    
-                    if !cookie_header.is_empty() {
-                        req = req.header("Cookie", &cookie_header);
-                    }
-                    
-                    if let Ok(mut resp) = req.call() {
-                        if let Ok(body) = resp.body_mut().read_to_string() {
-                            if body.contains("#EXT-X-STREAM-INF") {
-                                eprintln!("[DarkDM] Found master manifest: {}", candidate);
-                                use_url = candidate.clone();
-                                break;
-                            }
-                        }
-                    }
-                }
-                if use_url == manifest_url {
-                    eprintln!("[DarkDM] No master found, using variant URL");
-                }
-            } else if manifest_body.contains("#EXT-X-STREAM-INF") {
-                eprintln!("[DarkDM] Master manifest detected directly");
-            } else {
-                eprintln!("[DarkDM] Using provided URL directly");
-            }
-            
-            // Also use extra headers from manifest (Referer, etc.)
-            let referer = if !manifest_body.is_empty() && manifest_body.len() < 50 {
-                manifest_body.to_string() // Some sites put session key in body
-            } else {
-                String::new()
-            };
-            
             // Sanitize title for filename
             let safe_title: String = title.chars()
                 .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
@@ -386,65 +260,20 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             if !cookies.is_empty() {
                 let _ = std::fs::write(&cookies_path, cookies);
             }
-
-            // Try yt-dlp FIRST (handles dynamic playlists, refreshes manifest, 
-            // proper segment numbering, handles encryption, retry logic)
-            if which("yt-dlp") {
-                eprintln!("[DarkDM] yt-dlp download from manifest");
-                let ytdlp_path = find_binary("yt-dlp").unwrap_or_else(|| "yt-dlp".to_string());
-                
-                let mut ytdlp_cmd = Command::new(&ytdlp_path);
-                
-                // NO YouTube format flags (-f, --format-sort, --merge-output-format).
-                // For generic HLS (pelisjuanita, etc) the stream is already multiplexed.
-                // YouTube-specific flags cause duplication (326 MB vs 303 MB).
-                ytdlp_cmd.args(["-o", &output_str, "--no-playlist", 
-                               "--concurrent-fragments", "8",
-                               "--impersonate", "chrome-131",
-                               "--limit-rate", "50M",
-                               "--hls-use-mpegts",
-                               "--hls-prefer-native",
-                               &manifest_url]);
-                
-                if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
-                    ytdlp_cmd.args(["--cookies", &cookies_path.to_string_lossy()]);
-                }
-                
-                eprintln!("[DarkDM] Running yt-dlp...");
-                eprintln!("[DarkDM] URL: {}", manifest_url);
-                eprintln!("[DarkDM] Body preview (first 500 chars): {}", 
-                    manifest_body.chars().take(500).collect::<String>());
-                let start = std::time::Instant::now();
-                let status = ytdlp_cmd
-                    .stdout(Stdio::null()).stderr(Stdio::null())
-                    .status();
-                
-                let elapsed = start.elapsed();
-                let _ = std::fs::remove_file(&cookies_path);
-                
-                match status {
-                    Ok(s) if s.success() => {
-                        let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                        eprintln!("[DarkDM] yt-dlp OK: {} bytes in {:?}", size, elapsed);
-                        return ok_response(&format!("Downloaded: {} bytes in {:?}", size, elapsed), &output_str, size);
-                    },
-                    _ => {
-                        eprintln!("[DarkDM] yt-dlp failed ({:?}), trying ffmpeg fallback", elapsed);
-                    }
-                }
-            }
             
-            // Fallback: ffmpeg (only gets segments listed at capture time)
+            // Try ffmpeg with proper headers + cookies
             if which("ffmpeg") {
                 eprintln!("[DarkDM] ffmpeg download from manifest");
                 
                 let mut ffmpeg_cmd = Command::new("ffmpeg");
                 ffmpeg_cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
                 
+                // Add cookies if available
                 if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
                     ffmpeg_cmd.args(["-cookies", &cookies_path.to_string_lossy()]);
                 }
                 
+                // Add custom headers (User-Agent, Referer, etc.)
                 if let Ok(headers_map) = serde_json::from_str::<std::collections::HashMap<String, String>>(headers_json) {
                     for (k, v) in &headers_map {
                         if k.eq_ignore_ascii_case("user-agent") || k.eq_ignore_ascii_case("referer") {
@@ -452,14 +281,49 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                         }
                     }
                 } else {
+                    // Fallback User-Agent
                     ffmpeg_cmd.args(["-user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"]);
                 }
                 
+                // Input from manifest URL
                 ffmpeg_cmd.args(["-i", &manifest_url]);
                 ffmpeg_cmd.args(["-c", "copy", "-movflags", "+faststart", &output_str]);
                 
                 eprintln!("[DarkDM] Running ffmpeg...");
+                let start = std::time::Instant::now();
                 let status = ffmpeg_cmd
+                    .stdout(Stdio::null()).stderr(Stdio::null())
+                    .status();
+                
+                match status {
+                    Ok(s) if s.success() => {
+                        let elapsed = start.elapsed();
+                        let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                        eprintln!("[DarkDM] ffmpeg OK: {} bytes in {:?}", size, elapsed);
+                        // Cleanup temp cookies
+                        let _ = std::fs::remove_file(&cookies_path);
+                        return ok_response(&format!("Downloaded: {} bytes in {:?}", size, elapsed), &output_str, size);
+                    },
+                    _ => {
+                        eprintln!("[DarkDM] ffmpeg failed, trying yt-dlp");
+                    }
+                }
+            }
+            
+            // Fallback: yt-dlp
+            if which("yt-dlp") {
+                eprintln!("[DarkDM] yt-dlp download from manifest");
+                let ytdlp_path = find_binary("yt-dlp").unwrap_or_else(|| "yt-dlp".to_string());
+                
+                let mut ytdlp_cmd = Command::new(&ytdlp_path);
+                ytdlp_cmd.args(["-o", &output_str, "--no-playlist", "--concurrent-fragments", "8",
+                               "--impersonate", "chrome-131", &manifest_url]);
+                
+                if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+                    ytdlp_cmd.args(["--cookies", &cookies_path.to_string_lossy()]);
+                }
+                
+                let status = ytdlp_cmd
                     .stdout(Stdio::null()).stderr(Stdio::null())
                     .status();
                 
@@ -468,10 +332,10 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 match status {
                     Ok(s) if s.success() => {
                         let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                        return ok_response(&format!("Downloaded via ffmpeg: {} bytes", size), &output_str, size);
+                        return ok_response(&format!("Downloaded via yt-dlp: {} bytes", size), &output_str, size);
                     },
                     _ => {
-                        return error_response("Both yt-dlp and ffmpeg failed. The manifest might be protected or segments are encrypted.");
+                        return error_response("Both ffmpeg and yt-dlp failed. The manifest might be protected or segments are encrypted.");
                     }
                 }
             }
@@ -591,127 +455,13 @@ fn handle_message(msg: &ChromeMessage) -> Response {
         },
 
         // ============================================================
-        // PROXY START - Inicia proxy como proceso independiente
-        // ============================================================
-        "PROXY_START" => {
-            let session = format!("proxy_{}", chrono_name());
-            let port_str = "8899".to_string();
-            let output_str = output_dir.to_string_lossy().to_string();
-            
-            let sudo_pass = msg.extra.get("sudo_password").and_then(|v| v.as_str()).unwrap_or("");
-            let target_domain = msg.extra.get("target_domain").and_then(|v| v.as_str()).unwrap_or("");
-            
-            // Find the proxy binary: darkdm-mitm (mitmproxy) or fallback to darkdm-proxy
-            let proxy_path = find_binary("darkdm-mitm")
-                .or_else(|| {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    let fallback = format!("{}/.local/bin/darkdm-mitm", home);
-                    if Path::new(&fallback).exists() { Some(fallback) } else { None }
-                })
-                .unwrap_or_else(|| "darkdm-mitm".to_string());
-            
-            eprintln!("[DarkDM] Starting proxy: {} {}", proxy_path, port_str);
-            
-            // Store sudo password for cleanup later
-            if !sudo_pass.is_empty() {
-                if let Ok(mut p) = SUDO_PASSWORD.lock() {
-                    *p = sudo_pass.to_string();
-                }
-            }
-            
-            // Start the proxy (darkdm-mitm uses "start" subcommand)
-            let child_result = Command::new(&proxy_path)
-                .args(["start"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-            
-            match child_result {
-                Ok(child) => {
-                    let pid = child.id();
-                    if let Ok(mut p) = PROXY_PROCESS.lock() {
-                        *p = Some(child);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    
-                    // Add iptables rule for the target domain
-                    if !target_domain.is_empty() && !sudo_pass.is_empty() {
-                        run_iptables("add", target_domain, 8899);
-                        if let Ok(mut d) = IPTABLES_DOMAINS.lock() {
-                            d.push(target_domain.to_string());
-                        }
-                    }
-                    
-                    eprintln!("[DarkDM] Proxy started (PID {}) on port 8899", pid);
-                    Response {
-                        msg_type: "PROXY_RUNNING".to_string(),
-                        success: Some(true), error: None,
-                        message: Some(format!("Proxy running on port 8899 (PID {})", pid)),
-                        progress: None, filename: None,
-                        segments: None, bytes: None,
-                    }
-                },
-                Err(e) => error_response(&format!("Failed to start proxy: {}", e)),
-            }
-        },
-
-        // ============================================================
-        // PROXY STOP - Detiene proxy, limpia iptables, concatena
-        // ============================================================
-        "PROXY_STOP" => {
-            // Remove iptables rules
-            if let Ok(domains) = IPTABLES_DOMAINS.lock() {
-                for domain in domains.iter() {
-                    run_iptables("remove", domain, 8899);
-                }
-            }
-            if let Ok(mut d) = IPTABLES_DOMAINS.lock() {
-                d.clear();
-            }
-            
-            // Stop mitmproxy via the management script
-            let _ = Command::new("darkdm-mitm")
-                .args(["stop"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            
-            // Also kill the child process if we had one
-            if let Ok(mut p) = PROXY_PROCESS.lock() {
-                if let Some(mut child) = p.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-            }
-            
-            // Count segments and return
-            let seg_dir = output_dir.join("_proxy_segments");
-            let mut total_segs = 0u64;
-            if let Ok(entries) = std::fs::read_dir(&seg_dir) {
-                for entry in entries.flatten() {
-                    if entry.path().extension().map_or(false, |e| e == "ts" || e == "m3u8" || e == "mp4") {
-                        total_segs += 1;
-                    }
-                }
-            }
-            eprintln!("[DarkDM] Proxy stopped. {} segments captured", total_segs);
-            Response {
-                msg_type: "PROXY_STOPPED".to_string(),
-                success: Some(true), error: None,
-                message: Some(format!("Proxy stopped. {} segments captured", total_segs)),
-                progress: None, filename: None,
-                segments: Some(total_segs as usize), bytes: None,
-            }
-        },
-
-        // ============================================================
         // PING - Health check
         // ============================================================
         "PING" => Response {
             msg_type: "PONG".to_string(),
             success: Some(true),
             error: None,
-            message: Some(format!("DarkDM Native Host v1.0.0 (HLS+DASH+Direct+Proxy)")),
+            message: Some(format!("DarkDM Native Host v1.0.0 (HLS+DASH+Direct+SegmentCapture)")),
             progress: None, filename: None,
             segments: None, bytes: None,
         },
@@ -783,25 +533,11 @@ fn which(name: &str) -> bool {
 
 /// Find a binary, checking the DarkDM venv first
 fn find_binary(name: &str) -> Option<String> {
+    // Check DarkDM venv first (has curl_cffi for impersonation)
     let home = std::env::var("HOME").unwrap_or_default();
-    let locations = vec![
-        // Same directory as current exe
-        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name).to_string_lossy().to_string())),
-        // DarkDM venv
-        Some(format!("{}/.local/share/darkdm/venv/bin/{}", home, name)),
-        // ~/.local/bin/
-        Some(format!("{}/.local/bin/{}", home, name)),
-        // ~/bin/
-        Some(format!("{}/bin/{}", home, name)),
-        // /usr/local/bin/
-        Some(format!("/usr/local/bin/{}", name)),
-        // /usr/bin/
-        Some(format!("/usr/bin/{}", name)),
-    ];
-    for loc in locations.into_iter().flatten() {
-        if Path::new(&loc).exists() {
-            return Some(loc);
-        }
+    let venv_path = format!("{}/.local/share/darkdm/venv/bin/{}", home, name);
+    if Path::new(&venv_path).exists() {
+        return Some(venv_path);
     }
     // Fall back to PATH
     std::env::var("PATH").ok().and_then(|path| {
