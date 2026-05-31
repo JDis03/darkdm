@@ -160,8 +160,23 @@ fn handle_download(mut request: Request) {
     let user_agent_clone = user_agent.to_string();
     let referer_clone = referer.to_string();
     let output_str_clone = output_str.clone();
+    let output_dir_clone = output_dir.clone();
 
     thread::spawn(move || {
+        // Download and clean manifest to filter out ad URLs
+        let manifest_path = match download_and_clean_manifest(
+            &manifest_url_clone,
+            &user_agent_clone,
+            &referer_clone,
+            &output_dir_clone,
+        ) {
+            Ok(path) => path,
+            Err(e) => {
+                log::log(&format!("Failed to prepare manifest: {}", e));
+                return;
+            }
+        };
+
         let mut cmd = Command::new("ffmpeg");
         cmd.args([
             "-y",
@@ -178,7 +193,7 @@ fn handle_download(mut request: Request) {
 
         cmd.args([
             "-i",
-            &manifest_url_clone,
+            &manifest_path,
             "-c",
             "copy",
             "-movflags",
@@ -186,7 +201,7 @@ fn handle_download(mut request: Request) {
             &output_str_clone,
         ]);
 
-        log::log(&format!("Running: ffmpeg -i {} -c copy ...", manifest_url_clone));
+        log::log(&format!("Running: ffmpeg -i {} -c copy ...", manifest_path));
 
         match cmd.status() {
             Ok(status) if status.success() => {
@@ -202,6 +217,9 @@ fn handle_download(mut request: Request) {
                 log::log(&format!("ffmpeg spawn error: {}", e));
             }
         }
+
+        // Clean up temporary manifest
+        let _ = std::fs::remove_file(&manifest_path);
     });
 
     // Respond immediately
@@ -231,4 +249,72 @@ fn cors_methods_header() -> Header {
 
 fn cors_headers_header() -> Header {
     Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap()
+}
+
+/// Download manifest and filter out ad/tracking URLs
+fn download_and_clean_manifest(
+    url: &str,
+    user_agent: &str,
+    referer: &str,
+    output_dir: &std::path::Path,
+) -> Result<String, String> {
+    use std::io::Read;
+
+    // Download manifest using curl
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-s",
+        "-L",
+        "-A",
+        user_agent,
+        "-H",
+        &format!("Referer: {}", referer),
+        url,
+    ]);
+
+    let output = cmd.output().map_err(|e| format!("curl failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("curl exited with status: {}", output.status));
+    }
+
+    let manifest_content =
+        String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8: {}", e))?;
+
+    // Ad/tracking domains to filter out
+    let ad_domains = [
+        "tiktokcdn.com",
+        "doubleclick.net",
+        "googlesyndication.com",
+        "googleadservices.com",
+        "facebook.com",
+        "fbcdn.net",
+        "adsrvr.org",
+        "adnxs.com",
+    ];
+
+    // Filter manifest lines
+    let cleaned_lines: Vec<&str> = manifest_content
+        .lines()
+        .filter(|line| {
+            let line_lower = line.to_lowercase();
+            // Keep lines that don't contain ad domains
+            !ad_domains.iter().any(|domain| line_lower.contains(domain))
+        })
+        .collect();
+
+    let cleaned_manifest = cleaned_lines.join("\n");
+
+    // Save to temporary file
+    let manifest_path = output_dir.join("manifest_clean.m3u8");
+    std::fs::write(&manifest_path, &cleaned_manifest)
+        .map_err(|e| format!("Failed to write manifest: {}", e))?;
+
+    log::log(&format!(
+        "Manifest cleaned: {} lines -> {} lines (filtered ads)",
+        manifest_content.lines().count(),
+        cleaned_lines.len()
+    ));
+
+    Ok(manifest_path.to_string_lossy().to_string())
 }
