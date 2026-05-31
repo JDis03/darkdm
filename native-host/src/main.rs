@@ -298,26 +298,24 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 let _ = std::fs::write(&script_path, &script);
                 let _ = std::fs::set_permissions(&script_path, std::os::unix::fs::PermissionsExt::from_mode(0o755));
                 
-                eprintln!("[DarkDM] Script: {}", script_path.display());
-                let start = std::time::Instant::now();
-                let status = Command::new("bash")
+                eprintln!("[DarkDM] Ffmpeg script: {}", script_path.display());
+                
+                // Launch ffmpeg in background (detached) so native messaging doesn't timeout.
+                // Chrome native messaging times out ~30s, but ffmpeg takes minutes.
+                let child = Command::new("bash")
                     .arg(&script_path)
                     .stdout(Stdio::null()).stderr(Stdio::null())
-                    .status();
+                    .spawn();
                 
-                // Cleanup
-                let _ = std::fs::remove_file(&script_path);
-                let _ = std::fs::remove_file(&cookies_path);
-                
-                match status {
-                    Ok(s) if s.success() => {
-                        let elapsed = start.elapsed();
-                        let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                        eprintln!("[DarkDM] ffmpeg OK: {} bytes in {:?}", size, elapsed);
-                        return ok_response(&format!("Downloaded: {} bytes in {:?}", size, elapsed), &output_str, size);
+                match child {
+                    Ok(_) => {
+                        eprintln!("[DarkDM] ffmpeg launched in background");
+                        let _ = std::fs::remove_file(&cookies_path);
+                        return ok_response("Download started in background", &output_str, 0);
                     },
-                    _ => {
-                        eprintln!("[DarkDM] ffmpeg via bash script failed, trying yt-dlp");
+                    Err(e) => {
+                        eprintln!("[DarkDM] ffmpeg spawn failed: {}", e);
+                        // yt-dlp fallback below
                     }
                 }
             }
