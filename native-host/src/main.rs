@@ -267,7 +267,9 @@ fn handle_message(msg: &ChromeMessage) -> Response {
             if which("ffmpeg") {
                 eprintln!("[DarkDM] ffmpeg download from manifest (via bash script)");
                 
-                // Extract user-agent and referer from headers_json
+                // Extract user-agent and referer from headers_json or page_url
+                // Chrome filters Referer header from webRequest without 'extraHeaders' spec,
+                // so we use page_url (tab URL) as fallback.
                 let mut user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36".to_string();
                 let mut referer = String::new();
                 if let Ok(headers_map) = serde_json::from_str::<std::collections::HashMap<String, String>>(headers_json) {
@@ -276,6 +278,14 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                             user_agent = v.clone();
                         } else if k.eq_ignore_ascii_case("referer") {
                             referer = v.clone();
+                        }
+                    }
+                }
+                if referer.is_empty() {
+                    if let Some(page_url) = &msg.page_url {
+                        if !page_url.is_empty() {
+                            referer = page_url.clone();
+                            eprintln!("[DarkDM] Using page_url as referer: {}", page_url);
                         }
                     }
                 }
