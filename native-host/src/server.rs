@@ -183,12 +183,14 @@ fn handle_download(mut request: Request) {
             "-hide_banner",
             "-loglevel",
             "error",
-            "-user_agent",
-            &user_agent_clone,
         ]);
 
-        if !referer_clone.is_empty() {
-            cmd.args(["-referer", &referer_clone]);
+        // Only add user_agent and referer for remote URLs, not local files
+        if manifest_path.starts_with("http") {
+            cmd.args(["-user_agent", &user_agent_clone]);
+            if !referer_clone.is_empty() {
+                cmd.args(["-referer", &referer_clone]);
+            }
         }
 
         cmd.args([
@@ -293,13 +295,28 @@ fn download_and_clean_manifest(
         "adnxs.com",
     ];
 
-    // Filter manifest lines
-    let cleaned_lines: Vec<&str> = manifest_content
+    // Extract base URL for resolving relative paths
+    let base_url = if let Some(pos) = url.rfind('/') {
+        &url[..=pos]
+    } else {
+        url
+    };
+
+    // Filter manifest lines and resolve relative URLs
+    let cleaned_lines: Vec<String> = manifest_content
         .lines()
         .filter(|line| {
             let line_lower = line.to_lowercase();
             // Keep lines that don't contain ad domains
             !ad_domains.iter().any(|domain| line_lower.contains(domain))
+        })
+        .map(|line| {
+            // If line is a relative URL (doesn't start with http/https/#), make it absolute
+            if !line.starts_with("http") && !line.starts_with("https") && !line.starts_with('#') && !line.is_empty() {
+                format!("{}{}", base_url, line)
+            } else {
+                line.to_string()
+            }
         })
         .collect();
 
@@ -311,7 +328,7 @@ fn download_and_clean_manifest(
         .map_err(|e| format!("Failed to write manifest: {}", e))?;
 
     log::log(&format!(
-        "Manifest cleaned: {} lines -> {} lines (filtered ads)",
+        "Manifest cleaned: {} lines -> {} lines (filtered ads, resolved URLs)",
         manifest_content.lines().count(),
         cleaned_lines.len()
     ));
