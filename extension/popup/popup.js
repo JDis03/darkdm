@@ -56,9 +56,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         chrome.runtime.sendNativeMessage('com.darkdm.manager', msg, (response) => {
           if (chrome.runtime.lastError) {
-            alert('Error de conexión: ' + chrome.runtime.lastError.message);
+            alert('Error DM: ' + chrome.runtime.lastError.message);
             return;
           }
+          console.log('[DM] Native response:', response);
           if (response && response.success) {
             window.close();
           } else {
