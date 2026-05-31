@@ -261,51 +261,63 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 let _ = std::fs::write(&cookies_path, cookies);
             }
             
-            // Try ffmpeg with proper headers + cookies
+            // Generate and run ffmpeg via bash script (same as working /tmp/darkdm_ffmpeg_debug.sh)
+            // Direct Command::new("ffmpeg") with -headers fails ("Protocol not found")
+            // But a bash script with explicit -user_agent and -referer flags works.
             if which("ffmpeg") {
-                eprintln!("[DarkDM] ffmpeg download from manifest");
+                eprintln!("[DarkDM] ffmpeg download from manifest (via bash script)");
                 
-                let mut ffmpeg_cmd = Command::new("ffmpeg");
-                ffmpeg_cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
-                
-                // Add cookies if available
-                if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
-                    ffmpeg_cmd.args(["-cookies", &cookies_path.to_string_lossy()]);
-                }
-                
-                // Add custom headers (User-Agent, Referer, etc.)
+                // Extract user-agent and referer from headers_json
+                let mut user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36".to_string();
+                let mut referer = String::new();
                 if let Ok(headers_map) = serde_json::from_str::<std::collections::HashMap<String, String>>(headers_json) {
                     for (k, v) in &headers_map {
-                        if k.eq_ignore_ascii_case("user-agent") || k.eq_ignore_ascii_case("referer") {
-                            ffmpeg_cmd.args(["-headers", &format!("{}: {}\r\n", k, v)]);
+                        if k.eq_ignore_ascii_case("user-agent") {
+                            user_agent = v.clone();
+                        } else if k.eq_ignore_ascii_case("referer") {
+                            referer = v.clone();
                         }
                     }
-                } else {
-                    // Fallback User-Agent
-                    ffmpeg_cmd.args(["-user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"]);
                 }
                 
-                // Input from manifest URL
-                ffmpeg_cmd.args(["-i", &manifest_url]);
-                ffmpeg_cmd.args(["-c", "copy", "-movflags", "+faststart", &output_str]);
+                // Build bash script like the working /tmp/darkdm_ffmpeg_debug.sh
+                let script_path = std::path::Path::new("/tmp").join(format!("darkdm_ffmpeg_{}.sh", chrono_name()));
+                let mut script = format!(
+                    "#!/bin/bash\nffmpeg -y -hide_banner -loglevel error -user_agent '{}'",
+                    user_agent.replace('\'', "'\\''")
+                );
+                if !referer.is_empty() {
+                    script.push_str(&format!(" -referer '{}'", referer.replace('\'', "'\\''")));
+                }
+                script.push_str(&format!(
+                    " -i '{}' -c copy -movflags +faststart '{}'\n",
+                    manifest_url.replace('\'', "'\\''"),
+                    output_str.replace('\'', "'\\''")
+                ));
                 
-                eprintln!("[DarkDM] Running ffmpeg...");
+                let _ = std::fs::write(&script_path, &script);
+                let _ = std::fs::set_permissions(&script_path, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+                
+                eprintln!("[DarkDM] Script: {}", script_path.display());
                 let start = std::time::Instant::now();
-                let status = ffmpeg_cmd
+                let status = Command::new("bash")
+                    .arg(&script_path)
                     .stdout(Stdio::null()).stderr(Stdio::null())
                     .status();
+                
+                // Cleanup
+                let _ = std::fs::remove_file(&script_path);
+                let _ = std::fs::remove_file(&cookies_path);
                 
                 match status {
                     Ok(s) if s.success() => {
                         let elapsed = start.elapsed();
                         let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
                         eprintln!("[DarkDM] ffmpeg OK: {} bytes in {:?}", size, elapsed);
-                        // Cleanup temp cookies
-                        let _ = std::fs::remove_file(&cookies_path);
                         return ok_response(&format!("Downloaded: {} bytes in {:?}", size, elapsed), &output_str, size);
                     },
                     _ => {
-                        eprintln!("[DarkDM] ffmpeg failed, trying yt-dlp");
+                        eprintln!("[DarkDM] ffmpeg via bash script failed, trying yt-dlp");
                     }
                 }
             }
