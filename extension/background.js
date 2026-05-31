@@ -13,6 +13,7 @@ setInterval(() => { chrome.runtime.getPlatformInfo(() => {}); }, 15000);
 chrome.webRequest.onSendHeaders.addListener(function(details) {
   if (details.tabId <= 0) return;
   var url = details.url;
+  var isM3u8 = url.includes('.m3u8');
   
   if (isM3u8) {
     // Capture request headers
