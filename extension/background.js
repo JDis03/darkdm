@@ -101,59 +101,12 @@ chrome.tabs.onRemoved.addListener(function(tabId) {
   delete capturedMedia[tabId];
 });
 
-// ============================================================
-// Native messaging via persistent port (MV3 workaround)
-// sendNativeMessage is unreliable from service workers in MV3.
-// connectNative keeps the port open for reliable communication.
-// ============================================================
-let nativePort = null;
-
-function ensurePort() {
-  return new Promise(resolve => {
-    if (nativePort && nativePort.onMessage) {
-      resolve(true);
-      return;
-    }
-    try {
-      nativePort = chrome.runtime.connectNative(NH);
-      nativePort.onDisconnect.addListener(() => {
-        console.log('[DM] Native port disconnected');
-        nativePort = null;
-      });
-      nativePort.onMessage.addListener(() => {});
-      resolve(true);
-    } catch (e) {
-      console.log('[DM] Native port error:', e);
-      nativePort = null;
-      resolve(false);
-    }
-  });
-}
-
 function sn(msg) {
-  return new Promise(async r => {
+  return new Promise(r => {
     try {
-      await ensurePort();
-      if (!nativePort) { r(null); return; }
-      
-      var handler = function(resp) {
-        try { nativePort.onMessage.removeListener(handler); } catch(e) {}
-        r(resp);
-      };
-      nativePort.onMessage.addListener(handler);
-      
-      try {
-        nativePort.postMessage(msg);
-      } catch (e) {
-        try { nativePort.onMessage.removeListener(handler); } catch(e2) {}
-        r(null);
-      }
-      
-      // Timeout
-      setTimeout(() => {
-        try { nativePort.onMessage.removeListener(handler); } catch(e) {}
-        r(null);
-      }, 120000); // 2min for downloads
+      chrome.runtime.sendNativeMessage(NH, msg, resp => {
+        if (chrome.runtime.lastError) r(null); else r(resp);
+      });
     } catch (e) { r(null); }
   });
 }
@@ -187,8 +140,41 @@ async function stopProxy() {
 }
 
 // ============================================================
-// Message handler
+// Message handler (via popup port for keepalive)
 // ============================================================
+chrome.runtime.onConnect.addListener(function(port) {
+  if (port.name !== 'popup') return;
+  
+  port.onMessage.addListener(async function(msg) {
+    if (msg.type === 'DOWNLOAD_MEDIA') {
+      try {
+        const media = msg.media;
+        const tabUrl = msg.tabUrl || '';
+        const title = msg.tabTitle || 'video';
+        const downloadUrl = media.variantUrl || media.url;
+        
+        console.log('[DM] Download:', media.isMaster ? 'variant' : 'direct', downloadUrl.slice(0, 100));
+        
+        var resp = await sn({
+          type: 'DOWNLOAD_MANIFEST',
+          manifest_url: downloadUrl,
+          cookies: '',
+          title: title,
+          manifest_body: media.manifestBody || '',
+          page_url: tabUrl,
+          headers: JSON.stringify(media.headers || {})
+        });
+        port.postMessage({
+          success: !!(resp && resp.success),
+          error: (resp && resp.error) || ''
+        });
+      } catch(e) {
+        port.postMessage({ success: false, error: String(e) });
+      }
+    }
+  });
+});
+
 chrome.runtime.onMessage.addListener((msg, _, sendResponse) => {
   switch (msg.type) {
     case 'GET_CAPTURED_MEDIA':
@@ -197,37 +183,6 @@ chrome.runtime.onMessage.addListener((msg, _, sendResponse) => {
       } else {
         sendResponse({ media: [] });
       }
-      return true;
-    
-    case 'DOWNLOAD_MEDIA':
-      (async function() {
-        try {
-          const media = msg.media;
-          const tabUrl = msg.tabUrl || '';
-          const title = msg.tabTitle || 'video';
-          
-          // Use variant URL if it's a master playlist
-          const downloadUrl = media.variantUrl || media.url;
-          
-          console.log('[DM] Download:', media.isMaster ? 'variant' : 'direct', downloadUrl.slice(0, 100));
-          
-          var resp = await sn({
-            type: 'DOWNLOAD_MANIFEST',
-            manifest_url: downloadUrl,
-            cookies: '',
-            title: title,
-            manifest_body: media.manifestBody || '',
-            page_url: tabUrl,
-            headers: JSON.stringify(media.headers || {})
-          });
-          sendResponse({
-            success: !!(resp && resp.success),
-            error: (resp && resp.error) || ''
-          });
-        } catch(e) {
-          sendResponse({ success: false, error: String(e) });
-        }
-      })();
       return true;
     
     case 'START_PROXY':

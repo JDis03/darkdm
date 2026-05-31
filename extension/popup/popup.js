@@ -7,6 +7,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) return;
   
+  // Open port to background service worker to keep it alive
+  var bgPort = chrome.runtime.connect({ name: 'popup' });
+  
   // Load captured media
   chrome.runtime.sendMessage({ type: 'GET_CAPTURED_MEDIA', tabId: tab.id }, (res) => {
     if (!res || !res.media || res.media.length === 0) {
@@ -40,26 +43,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     streamsList.querySelectorAll('.btn-download').forEach(btn => {
       btn.addEventListener('click', () => {
         const idx = parseInt(btn.getAttribute('data-idx'));
-        const media = res.media[idx];
-        
-        // Send native message DIRECTLY from popup (MV3 service worker unreliable)
-        const downloadUrl = media.variantUrl || media.url;
-        const msg = {
-          type: 'DOWNLOAD_MANIFEST',
-          manifest_url: downloadUrl,
-          cookies: '',
-          title: tab.title || 'video',
-          manifest_body: media.manifestBody || '',
-          page_url: tab.url || '',
-          headers: JSON.stringify(media.headers || {})
-        };
-        
-        chrome.runtime.sendNativeMessage('com.darkdm.manager', msg, (response) => {
-          if (chrome.runtime.lastError) {
-            alert('Error DM: ' + chrome.runtime.lastError.message);
-            return;
-          }
-          console.log('[DM] Native response:', response);
+        bgPort.postMessage({
+          type: 'DOWNLOAD_MEDIA',
+          media: res.media[idx],
+          tabUrl: tab.url,
+          tabTitle: tab.title
+        });
+        bgPort.onMessage.addListener(function(response) {
           if (response && response.success) {
             window.close();
           } else {
