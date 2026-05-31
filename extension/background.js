@@ -1,11 +1,7 @@
 // DarkDM — Auto-detect HLS streams
 console.log('[DarkDM] Auto-detection mode loaded');
 
-const NH = 'com.darkdm.manager';
-let proxyActive = false;
 const capturedMedia = {}; // Store detected streams with headers
-
-setInterval(() => { chrome.runtime.getPlatformInfo(() => {}); }, 15000);
 
 // ============================================================
 // Auto-detect .m3u8 streams
@@ -101,95 +97,16 @@ chrome.tabs.onRemoved.addListener(function(tabId) {
   delete capturedMedia[tabId];
 });
 
-function sn(msg) {
-  return new Promise(r => {
-    try {
-      chrome.runtime.sendNativeMessage(NH, msg, resp => {
-        if (chrome.runtime.lastError) r(null); else r(resp);
-      });
-    } catch (e) { r(null); }
-  });
-}
-
 // ============================================================
-// Proxy control
+// Message handler - only GET_CAPTURED_MEDIA needed
 // ============================================================
-async function startProxy(password, domain) {
-  if (proxyActive) return { success: false, error: 'Ya activo' };
-  const resp = await sn({
-    type: 'PROXY_START',
-    sudo_password: password || '',
-    target_domain: domain || ''
-  });
-  if (resp?.success) {
-    proxyActive = true;
-    return { success: true, message: 'Proxy + iptables activo' };
-  }
-  return { success: false, error: resp?.error || 'Error al iniciar proxy' };
-}
-
-async function stopProxy() {
-  if (!proxyActive) return { success: false, error: 'No activo' };
-  const resp = await sn({ type: 'PROXY_STOP' });
-  proxyActive = false;
-  return {
-    success: resp?.success !== false,
-    segments: resp?.segments || 0,
-    message: resp?.message || 'Proxy detenido'
-  };
-}
-
-// ============================================================
-// Message handler (via popup port for keepalive)
-// ============================================================
-chrome.runtime.onConnect.addListener(function(port) {
-  if (port.name !== 'popup') return;
-  
-  port.onMessage.addListener(async function(msg) {
-    if (msg.type === 'DOWNLOAD_MEDIA') {
-      try {
-        const media = msg.media;
-        const tabUrl = msg.tabUrl || '';
-        const title = msg.tabTitle || 'video';
-        const downloadUrl = media.variantUrl || media.url;
-        
-        console.log('[DM] Download:', media.isMaster ? 'variant' : 'direct', downloadUrl.slice(0, 100));
-        
-        var resp = await sn({
-          type: 'DOWNLOAD_MANIFEST',
-          manifest_url: downloadUrl,
-          cookies: '',
-          title: title,
-          manifest_body: media.manifestBody || '',
-          page_url: tabUrl,
-          headers: JSON.stringify(media.headers || {})
-        });
-        port.postMessage({
-          success: !!(resp && resp.success),
-          error: (resp && resp.error) || ''
-        });
-      } catch(e) {
-        port.postMessage({ success: false, error: String(e) });
-      }
-    }
-  });
-});
-
 chrome.runtime.onMessage.addListener((msg, _, sendResponse) => {
-  switch (msg.type) {
-    case 'GET_CAPTURED_MEDIA':
-      if (msg.tabId && capturedMedia[msg.tabId]) {
-        sendResponse({ media: capturedMedia[msg.tabId] });
-      } else {
-        sendResponse({ media: [] });
-      }
-      return true;
-    
-    case 'START_PROXY':
-      startProxy(msg.password, msg.domain).then(sendResponse);
-      return true;
-    case 'STOP_PROXY':
-      stopProxy().then(sendResponse);
-      return true;
+  if (msg.type === 'GET_CAPTURED_MEDIA') {
+    if (msg.tabId && capturedMedia[msg.tabId]) {
+      sendResponse({ media: capturedMedia[msg.tabId] });
+    } else {
+      sendResponse({ media: [] });
+    }
+    return true;
   }
 });

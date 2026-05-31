@@ -1,4 +1,4 @@
-// DarkDM Popup - Auto-detection
+// DarkDM Popup - Auto-detection + HTTP download
 document.addEventListener('DOMContentLoaded', async () => {
   const streamsList = document.getElementById('streamsList');
   if (!streamsList) return;
@@ -7,10 +7,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) return;
   
-  // Open port to background service worker to keep it alive
-  var bgPort = chrome.runtime.connect({ name: 'popup' });
-  
-  // Load captured media
+  // Load captured media from background
   chrome.runtime.sendMessage({ type: 'GET_CAPTURED_MEDIA', tabId: tab.id }, (res) => {
     if (!res || !res.media || res.media.length === 0) {
       streamsList.innerHTML = '<span class="empty">No se detectaron streams aún</span>';
@@ -39,23 +36,40 @@ document.addEventListener('DOMContentLoaded', async () => {
       streamsList.appendChild(item);
     });
     
-    // Download buttons
+    // Download buttons - send directly to HTTP server
     streamsList.querySelectorAll('.btn-download').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const idx = parseInt(btn.getAttribute('data-idx'));
-        bgPort.postMessage({
-          type: 'DOWNLOAD_MEDIA',
-          media: res.media[idx],
-          tabUrl: tab.url,
-          tabTitle: tab.title
-        });
-        bgPort.onMessage.addListener(function(response) {
-          if (response && response.success) {
+        const media = res.media[idx];
+        
+        // Use variant URL if it's a master playlist
+        const downloadUrl = media.variantUrl || media.url;
+        
+        const payload = {
+          manifest_url: downloadUrl,
+          title: tab.title || 'video',
+          page_url: tab.url || '',
+          headers: media.headers || {},
+          cookies: ''
+        };
+        
+        try {
+          const response = await fetch('http://localhost:8765/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          
+          const result = await response.json();
+          
+          if (result.success) {
             window.close();
           } else {
-            alert('Error: ' + (response?.error || 'Unknown'));
+            alert('Error: ' + (result.error || 'Unknown'));
           }
-        });
+        } catch (e) {
+          alert('DarkDM no está corriendo.\n\nEjecuta:\nsystemctl --user start darkdm-host\n\nO manualmente:\n~/.local/bin/darkdm-host');
+        }
       });
     });
   });

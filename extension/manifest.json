@@ -11,7 +11,6 @@
   },
   "permissions": [
     "cookies",
-    "nativeMessaging",
     "storage",
     "scripting",
     "webNavigation",
@@ -19,7 +18,8 @@
   ],
   "host_permissions": [
     "http://*/*",
-    "https://*/*"
+    "https://*/*",
+    "http://localhost:8765/*"
   ],
   "background": {
     "service_worker": "background.js"
