@@ -101,12 +101,59 @@ chrome.tabs.onRemoved.addListener(function(tabId) {
   delete capturedMedia[tabId];
 });
 
-function sn(msg) {
-  return new Promise(r => {
+// ============================================================
+// Native messaging via persistent port (MV3 workaround)
+// sendNativeMessage is unreliable from service workers in MV3.
+// connectNative keeps the port open for reliable communication.
+// ============================================================
+let nativePort = null;
+
+function ensurePort() {
+  return new Promise(resolve => {
+    if (nativePort && nativePort.onMessage) {
+      resolve(true);
+      return;
+    }
     try {
-      chrome.runtime.sendNativeMessage(NH, msg, resp => {
-        if (chrome.runtime.lastError) r(null); else r(resp);
+      nativePort = chrome.runtime.connectNative(NH);
+      nativePort.onDisconnect.addListener(() => {
+        console.log('[DM] Native port disconnected');
+        nativePort = null;
       });
+      nativePort.onMessage.addListener(() => {});
+      resolve(true);
+    } catch (e) {
+      console.log('[DM] Native port error:', e);
+      nativePort = null;
+      resolve(false);
+    }
+  });
+}
+
+function sn(msg) {
+  return new Promise(async r => {
+    try {
+      await ensurePort();
+      if (!nativePort) { r(null); return; }
+      
+      var handler = function(resp) {
+        try { nativePort.onMessage.removeListener(handler); } catch(e) {}
+        r(resp);
+      };
+      nativePort.onMessage.addListener(handler);
+      
+      try {
+        nativePort.postMessage(msg);
+      } catch (e) {
+        try { nativePort.onMessage.removeListener(handler); } catch(e2) {}
+        r(null);
+      }
+      
+      // Timeout
+      setTimeout(() => {
+        try { nativePort.onMessage.removeListener(handler); } catch(e) {}
+        r(null);
+      }, 120000); // 2min for downloads
     } catch (e) { r(null); }
   });
 }
