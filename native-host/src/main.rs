@@ -261,11 +261,10 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                 let _ = std::fs::write(&cookies_path, cookies);
             }
             
-            // Generate and run ffmpeg via bash script (same as working /tmp/darkdm_ffmpeg_debug.sh)
-            // Direct Command::new("ffmpeg") with -headers fails ("Protocol not found")
-            // But a bash script with explicit -user_agent and -referer flags works.
+            // Call ffmpeg directly with -user_agent and -referer flags (same as working bash script).
+            // NOTE: -headers option doesn't work ("Protocol not found"), use explicit flags instead.
             if which("ffmpeg") {
-                eprintln!("[DarkDM] ffmpeg download from manifest (via bash script)");
+                eprintln!("[DarkDM] ffmpeg download from manifest");
                 
                 // Extract user-agent and referer from headers_json or page_url
                 // Chrome filters Referer header from webRequest without 'extraHeaders' spec,
@@ -290,42 +289,34 @@ fn handle_message(msg: &ChromeMessage) -> Response {
                     }
                 }
                 
-                // Build bash script like the working /tmp/darkdm_ffmpeg_debug.sh
-                let script_path = std::path::Path::new("/tmp").join(format!("darkdm_ffmpeg_{}.sh", chrono_name()));
-                let mut script = format!(
-                    "#!/bin/bash\nffmpeg -y -hide_banner -loglevel error -user_agent '{}'",
-                    user_agent.replace('\'', "'\\''")
-                );
+                let mut ffmpeg = Command::new("ffmpeg");
+                ffmpeg.args(["-y", "-hide_banner", "-loglevel", "error"])
+                    .arg("-user_agent").arg(&user_agent);
                 if !referer.is_empty() {
-                    script.push_str(&format!(" -referer '{}'", referer.replace('\'', "'\\''")));
+                    ffmpeg.arg("-referer").arg(&referer);
                 }
-                script.push_str(&format!(
-                    " -i '{}' -c copy -movflags +faststart '{}'\n",
-                    manifest_url.replace('\'', "'\\''"),
-                    output_str.replace('\'', "'\\''")
-                ));
+                if !cookies.is_empty() && std::fs::metadata(&cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+                    ffmpeg.arg("-cookies").arg(&cookies_path.to_string_lossy().to_string());
+                }
+                ffmpeg.args(["-i", &manifest_url, "-c", "copy", "-movflags", "+faststart", &output_str]);
                 
-                let _ = std::fs::write(&script_path, &script);
-                let _ = std::fs::set_permissions(&script_path, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+                eprintln!("[DarkDM] Running ffmpeg...");
                 
-                eprintln!("[DarkDM] Ffmpeg script: {}", script_path.display());
-                
-                // Launch ffmpeg in background (detached) so native messaging doesn't timeout.
-                // Chrome native messaging times out ~30s, but ffmpeg takes minutes.
-                let child = Command::new("bash")
-                    .arg(&script_path)
+                // Launch in background so native messaging doesn't timeout (~30s limit).
+                // ffmpeg continues running as orphan after host exits.
+                let child = ffmpeg
                     .stdout(Stdio::null()).stderr(Stdio::null())
                     .spawn();
+                
+                let _ = std::fs::remove_file(&cookies_path);
                 
                 match child {
                     Ok(_) => {
                         eprintln!("[DarkDM] ffmpeg launched in background");
-                        let _ = std::fs::remove_file(&cookies_path);
                         return ok_response("Download started in background", &output_str, 0);
                     },
                     Err(e) => {
                         eprintln!("[DarkDM] ffmpeg spawn failed: {}", e);
-                        // yt-dlp fallback below
                     }
                 }
             }
