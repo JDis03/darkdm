@@ -97,6 +97,13 @@ chrome.tabs.onRemoved.addListener(function(tabId) {
   delete capturedMedia[tabId];
 });
 
+// Clear captured streams when page navigates/reloads
+chrome.webNavigation.onCommitted.addListener(function(details) {
+  if (details.frameId === 0) {
+    delete capturedMedia[details.tabId];
+  }
+});
+
 // ============================================================
 // Message handler - only GET_CAPTURED_MEDIA needed
 // ============================================================
