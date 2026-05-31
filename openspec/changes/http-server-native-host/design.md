@@ -1,5 +1,20 @@
 ## Context
 
+**Referencia: Video DownloadHelper (extensión instalada en Vivaldi)**
+
+DownloadHelper resuelve el mismo problema (MV3 service worker lifecycle) usando:
+- `chrome.offscreen` API con `reasons: [chrome.offscreen.Reason.WORKERS]`
+- `BroadcastChannel` para comunicación service worker ↔ offscreen document
+- NO usa `nativeMessaging` (confirmado en su manifest.json)
+- Descarga directamente desde el browser con `chrome.downloads` API
+
+**Diferencia clave con DarkDM:**
+- DownloadHelper descarga streams que el browser puede manejar directamente
+- DarkDM necesita ejecutar `ffmpeg` (binario externo) para streams HLS multiplexados
+- Por eso DarkDM necesita un proceso externo (HTTP server) en lugar de solo offscreen document
+
+**Arquitectura actual de DarkDM:**
+
 DarkDM es un gestor de descargas de video para Linux (estilo IDM). La arquitectura actual tiene dos componentes:
 
 1. **Extensión Chrome/Vivaldi (MV3)**: Detecta streams HLS (.m3u8) via `webRequest.onSendHeaders`, muestra popup con streams detectados, envía solicitudes de descarga al native host via `chrome.runtime.sendNativeMessage`
@@ -120,6 +135,21 @@ DarkDM es un gestor de descargas de video para Linux (estilo IDM). La arquitectu
 - Simplifica el código (eliminar `read_message`/`write_message`)
 - El manifest JSON en `~/.config/vivaldi/NativeMessagingHosts/` ya no es necesario
 - La extensión ya no necesita el permiso `nativeMessaging`
+
+### 7. NO usar chrome.offscreen API (descartado)
+
+**Decisión**: NO usar `chrome.offscreen` API como DownloadHelper.
+
+**Rationale**:
+- DownloadHelper usa offscreen para mantener workers corriendo y descargar con `chrome.downloads` API
+- DarkDM necesita ejecutar `ffmpeg` (binario externo) que NO puede correr dentro del browser
+- Offscreen document sigue siendo parte del browser sandbox — no puede ejecutar procesos del sistema
+- HTTP server permite ejecutar cualquier binario (ffmpeg, yt-dlp, etc.) sin restricciones del browser
+
+**Alternativas consideradas**:
+- `chrome.offscreen` + `chrome.downloads`: No puede ejecutar ffmpeg, solo descargas HTTP directas
+- `chrome.offscreen` + Native Messaging: Mismo problema que ya tenemos (service worker lifecycle)
+- HTTP server (elegido): Permite ejecutar ffmpeg y cualquier binario externo
 
 ## Risks / Trade-offs
 
