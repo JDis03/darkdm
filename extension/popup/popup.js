@@ -40,12 +40,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     streamsList.querySelectorAll('.btn-download').forEach(btn => {
       btn.addEventListener('click', () => {
         const idx = parseInt(btn.getAttribute('data-idx'));
-        chrome.runtime.sendMessage({
-          type: 'DOWNLOAD_MEDIA',
-          media: res.media[idx],
-          tabUrl: tab.url,
-          tabTitle: tab.title
-        }, (response) => {
+        const media = res.media[idx];
+        
+        // Send native message DIRECTLY from popup (MV3 service worker unreliable)
+        const downloadUrl = media.variantUrl || media.url;
+        const msg = {
+          type: 'DOWNLOAD_MANIFEST',
+          manifest_url: downloadUrl,
+          cookies: '',
+          title: tab.title || 'video',
+          manifest_body: media.manifestBody || '',
+          page_url: tab.url || '',
+          headers: JSON.stringify(media.headers || {})
+        };
+        
+        chrome.runtime.sendNativeMessage('com.darkdm.manager', msg, (response) => {
+          if (chrome.runtime.lastError) {
+            alert('Error de conexión: ' + chrome.runtime.lastError.message);
+            return;
+          }
           if (response && response.success) {
             window.close();
           } else {
