@@ -40,7 +40,7 @@ chrome.webRequest.onSendHeaders.addListener(function(details) {
     var shouldFetch = !existing || existing.isAd;
     if (!existing) {
       capturedMedia[details.tabId].push(mediaInfo);
-      console.log('[DM] M3U8 detected:', url.slice(0, 100));
+      console.log('[DM] M3U8 detected:', url);
     } else if (existing.isAd) {
       console.log('[DM] Re-fetching ad manifest (checking for real video):', url.slice(0, 80));
     }
