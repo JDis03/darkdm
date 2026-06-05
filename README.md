@@ -1,6 +1,6 @@
 # DarkDM — Video Download Manager for Linux
 
-DarkDM is a video download manager for Linux inspired by IDM. It detects HLS streams automatically from any streaming site and downloads them via ffmpeg — no DRM bypassing, just capturing what the browser already plays.
+DarkDM is a video download manager for Linux inspired by IDM. It detects HLS streams automatically from any streaming site and downloads them via ffmpeg — no DRM bypassing, just intercepting the stream URLs the page requests.
 
 ## Architecture
 
