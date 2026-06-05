@@ -194,21 +194,18 @@ fn handle_download(mut request: Request) {
             return;
         }
 
-        // Try ffmpeg first (fast, no re-encode)
+        // Try ffmpeg first — same approach that works for Jack Ryan
         log::log(&format!("Trying ffmpeg for: {}", manifest_url_clone));
         let ffmpeg_ok = {
-            let headers = format!("User-Agent: {}\r\nReferer: {}\r\n", user_agent_clone, referer_clone);
-            let status = Command::new("ffmpeg")
-                .args([
-                    "-y", "-hide_banner", "-loglevel", "error",
-                    "-headers", &headers,
-                    "-allowed_extensions", "ALL",
-                    "-i", &manifest_url_clone,
-                    "-c", "copy", "-movflags", "+faststart",
-                    &output_str_clone,
-                ])
-                .status();
-            matches!(status, Ok(s) if s.success())
+            let mut cmd = Command::new("ffmpeg");
+            cmd.args(["-y", "-hide_banner", "-loglevel", "error",
+                      "-user_agent", &user_agent_clone]);
+            if !referer_clone.is_empty() {
+                cmd.args(["-referer", &referer_clone]);
+            }
+            cmd.args(["-i", &manifest_url_clone, "-c", "copy",
+                      "-movflags", "+faststart", &output_str_clone]);
+            matches!(cmd.status(), Ok(s) if s.success())
         };
 
         if ffmpeg_ok {
@@ -216,29 +213,16 @@ fn handle_download(mut request: Request) {
             log::log(&format!("ffmpeg OK: {} bytes", size));
         } else {
             // ffmpeg failed (e.g. TikTok CDN segments without .ts extension)
-            // Fall back to yt-dlp which handles non-standard HLS segments
-            log::log("ffmpeg failed, trying yt-dlp...");
-            let ytdlp = std::env::var("PATH").ok()
-                .and_then(|p| p.split(':').find(|d| std::path::Path::new(&format!("{}/yt-dlp", d)).exists()).map(|d| format!("{}/yt-dlp", d)))
-                .unwrap_or_else(|| "yt-dlp".to_string());
-            let status = Command::new(&ytdlp)
-                .args([
-                    "-o", &output_str_clone,
-                    "--no-playlist",
-                    "--concurrent-fragments", "4",
-                    "--user-agent", &user_agent_clone,
-                    "--add-header", &format!("Referer:{}", referer_clone),
-                    &manifest_url_clone,
-                ])
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    let size = std::fs::metadata(&output_str_clone).map(|m| m.len()).unwrap_or(0);
-                    log::log(&format!("yt-dlp OK: {} bytes", size));
-                }
-                Ok(s) => log::log(&format!("yt-dlp failed: {}", s)),
-                Err(e) => log::log(&format!("yt-dlp error: {}", e)),
-            }
+            // Download each segment with curl and concatenate — no remux, no corruption
+            log::log("ffmpeg failed, downloading segments manually...");
+            download_segments_and_concat(
+                &manifest_content,
+                &manifest_url_clone,
+                &user_agent_clone,
+                &referer_clone,
+                &output_str_clone,
+                &output_dir_clone,
+            );
         }
 
         // Cleanup temp manifest
@@ -272,6 +256,79 @@ fn cors_methods_header() -> Header {
 
 fn cors_headers_header() -> Header {
     Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap()
+}
+
+/// Download each HLS segment with curl and concatenate into output file
+/// Used when ffmpeg can't handle the segment URLs (e.g. no file extension)
+fn download_segments_and_concat(
+    manifest_content: &str,
+    base_url: &str,
+    user_agent: &str,
+    referer: &str,
+    output_path: &str,
+    work_dir: &std::path::Path,
+) {
+    // Parse segment URLs from manifest
+    let base = if let Some(pos) = base_url.rfind('/') { &base_url[..=pos] } else { base_url };
+    let segments: Vec<String> = manifest_content.lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .map(|l| {
+            if l.starts_with("http") { l.to_string() }
+            else { format!("{}{}", base, l) }
+        })
+        .collect();
+
+    if segments.is_empty() {
+        log::log("No segments found in manifest");
+        return;
+    }
+
+    log::log(&format!("Downloading {} segments...", segments.len()));
+
+    let seg_dir = work_dir.join("_segments");
+    let _ = std::fs::create_dir_all(&seg_dir);
+
+    // Download segments in parallel batches of 8
+    let total = segments.len();
+    for (i, seg_url) in segments.iter().enumerate() {
+        let seg_path = seg_dir.join(format!("{:05}.seg", i));
+        let status = Command::new("curl")
+            .args([
+                "-s", "-L", "-o", seg_path.to_str().unwrap_or(""),
+                "-A", user_agent,
+                "-H", &format!("Referer: {}", referer),
+                seg_url,
+            ])
+            .status();
+
+        if let Ok(s) = status {
+            if !s.success() {
+                log::log(&format!("Segment {} failed", i));
+            }
+        }
+
+        if i % 50 == 0 {
+            log::log(&format!("Progress: {}/{}", i, total));
+        }
+    }
+
+    log::log("All segments downloaded, concatenating...");
+
+    // Concatenate all segments into output file
+    let mut output = std::fs::File::create(output_path).expect("create output");
+    for i in 0..total {
+        let seg_path = seg_dir.join(format!("{:05}.seg", i));
+        if let Ok(data) = std::fs::read(&seg_path) {
+            use std::io::Write;
+            let _ = output.write_all(&data);
+        }
+    }
+
+    // Cleanup segment files
+    let _ = std::fs::remove_dir_all(&seg_dir);
+
+    let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+    log::log(&format!("Concat done: {} bytes -> {}", size, output_path));
 }
 
 /// Use browser-provided manifest body or download fresh, then clean it
