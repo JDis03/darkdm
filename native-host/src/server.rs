@@ -283,7 +283,11 @@ fn download_and_clean_manifest(
     let manifest_content =
         String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8: {}", e))?;
 
-    // Ad/tracking domains to filter out
+    // Save original manifest for debugging
+    let original_manifest_path = output_dir.join("manifest_original.m3u8");
+    let _ = std::fs::write(&original_manifest_path, &manifest_content);
+
+    // Ad/tracking domains to filter out (only filter complete URLs, not partial matches)
     let ad_domains = [
         "tiktokcdn.com",
         "doubleclick.net",
@@ -302,13 +306,29 @@ fn download_and_clean_manifest(
         url
     };
 
+    let mut filtered_count = 0;
+    let mut filtered_examples: Vec<String> = Vec::new();
+
     // Filter manifest lines and resolve relative URLs
     let cleaned_lines: Vec<String> = manifest_content
         .lines()
         .filter(|line| {
+            // Only filter lines that are URLs (not tags or empty lines)
+            if line.starts_with('#') || line.is_empty() {
+                return true;
+            }
+            
             let line_lower = line.to_lowercase();
-            // Keep lines that don't contain ad domains
-            !ad_domains.iter().any(|domain| line_lower.contains(domain))
+            let is_ad = ad_domains.iter().any(|domain| line_lower.contains(domain));
+            
+            if is_ad {
+                filtered_count += 1;
+                if filtered_examples.len() < 3 {
+                    filtered_examples.push(line.to_string());
+                }
+            }
+            
+            !is_ad
         })
         .map(|line| {
             // If line is a relative URL (doesn't start with http/https/#), make it absolute
@@ -328,10 +348,15 @@ fn download_and_clean_manifest(
         .map_err(|e| format!("Failed to write manifest: {}", e))?;
 
     log::log(&format!(
-        "Manifest cleaned: {} lines -> {} lines (filtered ads, resolved URLs)",
+        "Manifest cleaned: {} lines -> {} lines (filtered {} ad URLs)",
         manifest_content.lines().count(),
-        cleaned_lines.len()
+        cleaned_lines.len(),
+        filtered_count
     ));
+    
+    if !filtered_examples.is_empty() {
+        log::log(&format!("Filtered URL examples: {:?}", filtered_examples));
+    }
 
     Ok(manifest_path.to_string_lossy().to_string())
 }

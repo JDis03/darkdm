@@ -47,6 +47,24 @@ chrome.webRequest.onSendHeaders.addListener(function(details) {
       }).then(function(body) {
         if (!body) return;
         
+        // Filter out ad manifests (e.g. TikTok CDN ads injected by streaming sites)
+        var lines = body.split('\n');
+        var urlLines = lines.filter(function(l) { return l.startsWith('http'); });
+        if (urlLines.length > 0) {
+          var adDomains = ['tiktokcdn.com', 'doubleclick.net', 'googlesyndication.com', 'fbcdn.net'];
+          var adCount = urlLines.filter(function(l) {
+            return adDomains.some(function(d) { return l.includes(d); });
+          }).length;
+          if (adCount / urlLines.length > 0.5) {
+            console.log('[DM] Skipping ad manifest:', url.slice(0, 80));
+            // Remove from capturedMedia
+            if (capturedMedia[details.tabId]) {
+              capturedMedia[details.tabId] = capturedMedia[details.tabId].filter(function(m) { return m.url !== url; });
+            }
+            return;
+          }
+        }
+        
         var duration = 0;
         var isMaster = body.includes('#EXT-X-STREAM-INF');
         var variantUrl = null;
