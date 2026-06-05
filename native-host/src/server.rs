@@ -171,48 +171,48 @@ fn handle_download(mut request: Request) {
     let output_dir_clone = output_dir.clone();
 
     thread::spawn(move || {
-        // Use manifest body from extension (browser has session cookies) or download fresh
-        let manifest_path = match prepare_manifest(
-            manifest_body_from_ext,
-            &manifest_url_clone,
-            &user_agent_clone,
-            &referer_clone,
-            &output_dir_clone,
-        ) {
-            Ok(path) => path,
-            Err(e) => {
-                log::log(&format!("Failed to prepare manifest: {}", e));
-                return;
+        // Save manifest body from extension (or download fresh) to temp file
+        let manifest_path = output_dir_clone.join("manifest_clean.m3u8");
+        let manifest_content = if let Some(body) = manifest_body_from_ext {
+            log::log(&format!("Using browser manifest ({} bytes)", body.len()));
+            body
+        } else {
+            // Download with curl
+            let out = Command::new("curl")
+                .args(["-s", "-L", "-A", &user_agent_clone,
+                       "-H", &format!("Referer: {}", referer_clone),
+                       &manifest_url_clone])
+                .output();
+            match out {
+                Ok(o) => String::from_utf8(o.stdout).unwrap_or_default(),
+                Err(e) => { log::log(&format!("curl failed: {}", e)); return; }
             }
         };
 
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-        ]);
-
-        // Only add user_agent and referer for remote URLs, not local files
-        if manifest_path.starts_with("http") {
-            cmd.args(["-user_agent", &user_agent_clone]);
-            if !referer_clone.is_empty() {
-                cmd.args(["-referer", &referer_clone]);
-            }
+        if std::fs::write(&manifest_path, &manifest_content).is_err() {
+            log::log("Failed to write manifest");
+            return;
         }
 
+        // Build ffmpeg command
+        // -allowed_extensions ALL: allows segment URLs without .ts extension (e.g. TikTok CDN)
+        // -headers: sets User-Agent + Referer for all HTTP requests (including segments)
+        let headers = format!(
+            "User-Agent: {}\r\nReferer: {}\r\n",
+            user_agent_clone, referer_clone
+        );
+        let mut cmd = Command::new("ffmpeg");
         cmd.args([
-            "-i",
-            &manifest_path,
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
+            "-y", "-hide_banner", "-loglevel", "error",
+            "-headers", &headers,
+            "-allowed_extensions", "ALL",
+            "-i", manifest_path.to_str().unwrap_or(""),
+            "-c", "copy",
+            "-movflags", "+faststart",
             &output_str_clone,
         ]);
 
-        log::log(&format!("Running: ffmpeg -i {} -c copy ...", manifest_path));
+        log::log(&format!("Running: ffmpeg -i {} -c copy ...", manifest_path.display()));
 
         match cmd.status() {
             Ok(status) if status.success() => {
