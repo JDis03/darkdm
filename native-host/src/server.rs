@@ -347,15 +347,23 @@ fn download_and_clean_manifest(
     std::fs::write(&manifest_path, &cleaned_manifest)
         .map_err(|e| format!("Failed to write manifest: {}", e))?;
 
+    // Count real segment lines (non-tag, non-empty)
+    let real_segments = cleaned_lines.iter()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .count();
+
     log::log(&format!(
-        "Manifest cleaned: {} lines -> {} lines (filtered {} ad URLs)",
-        manifest_content.lines().count(),
-        cleaned_lines.len(),
-        filtered_count
+        "Manifest: {} lines, filtered {} ads, {} real segments remain",
+        manifest_content.lines().count(), filtered_count, real_segments
     ));
-    
+
     if !filtered_examples.is_empty() {
         log::log(&format!("Filtered URL examples: {:?}", filtered_examples));
+    }
+
+    // If no real segments remain after filtering, the ad is still playing
+    if real_segments == 0 {
+        return Err("Ad is still playing — wait for the real video to start, then click Download again.".to_string());
     }
 
     Ok(manifest_path.to_string_lossy().to_string())

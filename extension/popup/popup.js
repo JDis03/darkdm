@@ -46,9 +46,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const duration = media.duration ? formatDuration(media.duration) : '';
       const masterTag = media.isMaster ? '<span class="badge-master">MASTER</span>' : '';
-      const adTag = media.isAd ? '<span class="badge-ad">📢 Ad</span>' : '';
-      const btnDisabled = media.isAd ? 'disabled' : '';
-      const btnText = media.isAd ? '🚫 Ad — espera el video real' : '⬇️ Descargar';
+      const adTag = media.isAd ? '<span class="badge-ad">📢 espera el video</span>' : '';
+      const btnText = '⬇️ Descargar';
 
       item.innerHTML = `
         <div class="stream-header">
@@ -57,13 +56,13 @@ document.addEventListener('DOMContentLoaded', async () => {
           ${duration ? `<span class="duration">${duration}</span>` : ''}
         </div>
         <div class="stream-url" title="${media.url}">${truncateUrl(media.url, 60)}</div>
-        <button class="btn-download" data-idx="${idx}" ${btnDisabled}>${btnText}</button>
+        <button class="btn-download" data-idx="${idx}">${btnText}</button>
       `;
       streamsList.appendChild(item);
     });
 
     // Download buttons
-    streamsList.querySelectorAll('.btn-download:not([disabled])').forEach(btn => {
+    streamsList.querySelectorAll('.btn-download').forEach(btn => {
       btn.addEventListener('click', async () => {
         const idx = parseInt(btn.getAttribute('data-idx'));
         const media = res.media[idx];
