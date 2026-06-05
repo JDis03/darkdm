@@ -50,10 +50,12 @@ vivaldi://extensions → Enable developer mode → Load unpacked → select exte
 ### 3. Download a video
 
 1. Open any streaming site (pelisjuanita.com, etc.)
-2. Play the video so it loads
-3. Click the **DarkDM** extension icon — detected streams appear
+2. Navigate to the movie/episode page — **no need to press play**
+3. Click the **DarkDM** extension icon — detected streams appear automatically
 4. Click **⬇️ Descargar**
 5. Check `~/Descargas/DarkDM/`
+
+> The extension intercepts `.m3u8` requests via `webRequest.onSendHeaders` as soon as the page loads them — before any video plays.
 
 ## Dependencies
 
