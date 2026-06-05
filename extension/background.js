@@ -35,11 +35,16 @@ chrome.webRequest.onSendHeaders.addListener(function(details) {
       timestamp: Date.now()
     };
     
-    // Avoid duplicates
+    // Avoid duplicates — but re-fetch if existing entry was an ad
     var existing = capturedMedia[details.tabId].find(function(m) { return m.url === url; });
+    var shouldFetch = !existing || existing.isAd;
     if (!existing) {
       capturedMedia[details.tabId].push(mediaInfo);
       console.log('[DM] M3U8 detected:', url.slice(0, 100));
+    } else if (existing.isAd) {
+      console.log('[DM] Re-fetching ad manifest (checking for real video):', url.slice(0, 80));
+    }
+    if (shouldFetch) {
       
       // Fetch and parse manifest
       fetch(url, { headers: headers }).then(function(response) {
@@ -93,7 +98,10 @@ chrome.webRequest.onSendHeaders.addListener(function(details) {
             entry.isMaster = isMaster;
             entry.manifestBody = body;
             entry.variantUrl = variantUrl;
-            entry.isAd = isAd; // Mark as ad if manifest contains mostly ad URLs
+            entry.isAd = isAd;
+            if (!isAd) {
+              console.log('[DM] Stream is now real video (was ad):', url.slice(0, 80));
+            }
           }
         }
       }).catch(function() {});
