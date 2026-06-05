@@ -10,6 +10,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   const refreshBtn = document.getElementById('refreshBtn');
   if (refreshBtn) refreshBtn.addEventListener('click', loadStreams);
 
+  // Listen for stream updates from background
+  chrome.runtime.onMessage.addListener(function(msg) {
+    if (msg.type === 'STREAMS_UPDATED' && msg.tabId === tab.id) {
+      loadStreams();
+    }
+  });
+
   let autoRefreshInterval = null;
 
   function loadStreams() {

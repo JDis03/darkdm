@@ -45,6 +45,7 @@ chrome.webRequest.onSendHeaders.addListener(function(details) {
       console.log('[DM] Re-fetching ad manifest (checking for real video):', url.slice(0, 80));
     }
     if (shouldFetch) {
+      var captureTabId = details.tabId;
       
       // Fetch and parse manifest
       fetch(url, { headers: headers }).then(function(response) {
@@ -100,10 +101,13 @@ chrome.webRequest.onSendHeaders.addListener(function(details) {
             entry.variantUrl = variantUrl;
             entry.isAd = isAd;
             if (!isAd) {
-              console.log('[DM] Stream is now real video (was ad):', url.slice(0, 80));
+              console.log('[DM] Real stream ready:', url.slice(0, 80));
             }
           }
         }
+        // Notify popup to refresh
+        chrome.runtime.sendMessage({ type: 'STREAMS_UPDATED', tabId: captureTabId })
+          .catch(function() {}); // popup may not be open
       }).catch(function() {});
     }
   }

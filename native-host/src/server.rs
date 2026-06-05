@@ -309,36 +309,41 @@ fn download_and_clean_manifest(
     let mut filtered_count = 0;
     let mut filtered_examples: Vec<String> = Vec::new();
 
-    // Filter manifest lines and resolve relative URLs
-    let cleaned_lines: Vec<String> = manifest_content
-        .lines()
-        .filter(|line| {
-            // Only filter lines that are URLs (not tags or empty lines)
-            if line.starts_with('#') || line.is_empty() {
-                return true;
-            }
-            
+    // Filter manifest: when a segment URL is an ad, also remove its preceding #EXTINF tag
+    let lines: Vec<&str> = manifest_content.lines().collect();
+    let mut cleaned_lines: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let is_segment_url = !line.starts_with('#') && !line.trim().is_empty();
+
+        if is_segment_url {
             let line_lower = line.to_lowercase();
             let is_ad = ad_domains.iter().any(|domain| line_lower.contains(domain));
-            
             if is_ad {
+                // Remove this URL and its preceding #EXTINF (if any)
+                if let Some(last) = cleaned_lines.last() {
+                    if last.starts_with("#EXTINF") {
+                        cleaned_lines.pop();
+                    }
+                }
                 filtered_count += 1;
                 if filtered_examples.len() < 3 {
                     filtered_examples.push(line.to_string());
                 }
-            }
-            
-            !is_ad
-        })
-        .map(|line| {
-            // If line is a relative URL (doesn't start with http/https/#), make it absolute
-            if !line.starts_with("http") && !line.starts_with("https") && !line.starts_with('#') && !line.is_empty() {
-                format!("{}{}", base_url, line)
             } else {
-                line.to_string()
+                // Resolve relative URL
+                if !line.starts_with("http") {
+                    cleaned_lines.push(format!("{}{}", base_url, line));
+                } else {
+                    cleaned_lines.push(line.to_string());
+                }
             }
-        })
-        .collect();
+        } else {
+            cleaned_lines.push(line.to_string());
+        }
+        i += 1;
+    }
 
     let cleaned_manifest = cleaned_lines.join("\n");
 
