@@ -194,42 +194,54 @@ fn handle_download(mut request: Request) {
             return;
         }
 
-        // Build ffmpeg command
-        // -allowed_extensions ALL: allows segment URLs without .ts extension (e.g. TikTok CDN)
-        // -headers: sets User-Agent + Referer for all HTTP requests (including segments)
-        let headers = format!(
-            "User-Agent: {}\r\nReferer: {}\r\n",
-            user_agent_clone, referer_clone
-        );
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args([
-            "-y", "-hide_banner", "-loglevel", "error",
-            "-headers", &headers,
-            "-allowed_extensions", "ALL",
-            "-i", manifest_path.to_str().unwrap_or(""),
-            "-c", "copy",
-            "-movflags", "+faststart",
-            &output_str_clone,
-        ]);
+        // Try ffmpeg first (fast, no re-encode)
+        log::log(&format!("Trying ffmpeg for: {}", manifest_url_clone));
+        let ffmpeg_ok = {
+            let headers = format!("User-Agent: {}\r\nReferer: {}\r\n", user_agent_clone, referer_clone);
+            let status = Command::new("ffmpeg")
+                .args([
+                    "-y", "-hide_banner", "-loglevel", "error",
+                    "-headers", &headers,
+                    "-allowed_extensions", "ALL",
+                    "-i", &manifest_url_clone,
+                    "-c", "copy", "-movflags", "+faststart",
+                    &output_str_clone,
+                ])
+                .status();
+            matches!(status, Ok(s) if s.success())
+        };
 
-        log::log(&format!("Running: ffmpeg -i {} -c copy ...", manifest_path.display()));
-
-        match cmd.status() {
-            Ok(status) if status.success() => {
-                let size = std::fs::metadata(&output_str_clone)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                log::log(&format!("ffmpeg OK: {} bytes -> {}", size, output_str_clone));
-            }
-            Ok(status) => {
-                log::log(&format!("ffmpeg failed with status: {}", status));
-            }
-            Err(e) => {
-                log::log(&format!("ffmpeg spawn error: {}", e));
+        if ffmpeg_ok {
+            let size = std::fs::metadata(&output_str_clone).map(|m| m.len()).unwrap_or(0);
+            log::log(&format!("ffmpeg OK: {} bytes", size));
+        } else {
+            // ffmpeg failed (e.g. TikTok CDN segments without .ts extension)
+            // Fall back to yt-dlp which handles non-standard HLS segments
+            log::log("ffmpeg failed, trying yt-dlp...");
+            let ytdlp = std::env::var("PATH").ok()
+                .and_then(|p| p.split(':').find(|d| std::path::Path::new(&format!("{}/yt-dlp", d)).exists()).map(|d| format!("{}/yt-dlp", d)))
+                .unwrap_or_else(|| "yt-dlp".to_string());
+            let status = Command::new(&ytdlp)
+                .args([
+                    "-o", &output_str_clone,
+                    "--no-playlist",
+                    "--concurrent-fragments", "4",
+                    "--user-agent", &user_agent_clone,
+                    "--add-header", &format!("Referer:{}", referer_clone),
+                    &manifest_url_clone,
+                ])
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    let size = std::fs::metadata(&output_str_clone).map(|m| m.len()).unwrap_or(0);
+                    log::log(&format!("yt-dlp OK: {} bytes", size));
+                }
+                Ok(s) => log::log(&format!("yt-dlp failed: {}", s)),
+                Err(e) => log::log(&format!("yt-dlp error: {}", e)),
             }
         }
 
-        // Clean up temporary manifest
+        // Cleanup temp manifest
         let _ = std::fs::remove_file(&manifest_path);
     });
 
