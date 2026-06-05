@@ -22,15 +22,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       const duration = media.duration ? formatDuration(media.duration) : '';
       const masterTag = media.isMaster ? '<span class="badge-master">MASTER</span>' : '';
+      const adTag = media.isAd ? '<span class="badge-ad">📢 Ad</span>' : '';
       
       item.innerHTML = `
         <div class="stream-header">
           <span>📹 M3U8</span>
           ${masterTag}
+          ${adTag}
           ${duration ? `<span class="duration">${duration}</span>` : ''}
         </div>
         <div class="stream-url" title="${media.url}">${truncateUrl(media.url, 60)}</div>
-        <button class="btn-download" data-idx="${idx}">⬇️ Descargar</button>
+        <button class="btn-download" data-idx="${idx}" ${media.isAd ? 'disabled title="Ad stream — wait for real video"' : ''}>
+          ${media.isAd ? '🚫 Ad' : '⬇️ Descargar'}
+        </button>
       `;
       
       streamsList.appendChild(item);

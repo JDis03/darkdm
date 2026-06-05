@@ -47,27 +47,16 @@ chrome.webRequest.onSendHeaders.addListener(function(details) {
       }).then(function(body) {
         if (!body) return;
         
-        // Filter out ad manifests (e.g. TikTok CDN ads injected by streaming sites)
-        var lines = body.split('\n');
-        var urlLines = lines.filter(function(l) { return l.startsWith('http'); });
-        if (urlLines.length > 0) {
-          var adDomains = ['tiktokcdn.com', 'doubleclick.net', 'googlesyndication.com', 'fbcdn.net'];
-          var adCount = urlLines.filter(function(l) {
-            return adDomains.some(function(d) { return l.includes(d); });
-          }).length;
-          if (adCount / urlLines.length > 0.5) {
-            console.log('[DM] Skipping ad manifest:', url.slice(0, 80));
-            // Remove from capturedMedia
-            if (capturedMedia[details.tabId]) {
-              capturedMedia[details.tabId] = capturedMedia[details.tabId].filter(function(m) { return m.url !== url; });
-            }
-            return;
-          }
-        }
-        
         var duration = 0;
         var isMaster = body.includes('#EXT-X-STREAM-INF');
         var variantUrl = null;
+        
+        // Detect if manifest is mostly ads (TikTok CDN etc.)
+        var urlLines = body.split('\n').filter(function(l) { return l.startsWith('http'); });
+        var adDomains = ['tiktokcdn.com', 'doubleclick.net', 'googlesyndication.com', 'fbcdn.net'];
+        var isAd = urlLines.length > 0 && urlLines.filter(function(l) {
+          return adDomains.some(function(d) { return l.includes(d); });
+        }).length / urlLines.length > 0.5;
         
         if (isMaster) {
           // Parse master to find best quality variant
@@ -103,7 +92,8 @@ chrome.webRequest.onSendHeaders.addListener(function(details) {
             entry.duration = duration;
             entry.isMaster = isMaster;
             entry.manifestBody = body;
-            entry.variantUrl = variantUrl; // Store best variant URL
+            entry.variantUrl = variantUrl;
+            entry.isAd = isAd; // Mark as ad if manifest contains mostly ad URLs
           }
         }
       }).catch(function() {});
