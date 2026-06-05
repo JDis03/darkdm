@@ -83,8 +83,19 @@ document.addEventListener('DOMContentLoaded', async () => {
           cookies: ''
         };
 
-        btn.textContent = '⏳ Iniciando...';
+        btn.textContent = '⏳ Obteniendo stream...';
         btn.disabled = true;
+
+        // Re-fetch manifest NOW with browser credentials (has session cookies)
+        // This gets the fresh content (real video if playing, not the cached ad)
+        try {
+          const manifestRes = await fetch(downloadUrl, { headers: media.headers || {} });
+          if (manifestRes.ok) {
+            payload.manifest_body = await manifestRes.text();
+          }
+        } catch(e) {}
+
+        btn.textContent = '⏳ Iniciando...';
 
         try {
           const response = await fetch('http://localhost:8765/download', {

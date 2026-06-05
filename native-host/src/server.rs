@@ -155,6 +155,14 @@ fn handle_download(mut request: Request) {
         manifest_url, output_str, referer
     ));
 
+    // Use manifest_body from extension if provided (browser-fetched, has session cookies)
+    // Otherwise fall back to downloading fresh with curl
+    let manifest_body_from_ext = data
+        .get("manifest_body")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     // Spawn ffmpeg in background
     let manifest_url_clone = manifest_url.clone();
     let user_agent_clone = user_agent.to_string();
@@ -163,8 +171,9 @@ fn handle_download(mut request: Request) {
     let output_dir_clone = output_dir.clone();
 
     thread::spawn(move || {
-        // Download and clean manifest to filter out ad URLs
-        let manifest_path = match download_and_clean_manifest(
+        // Use manifest body from extension (browser has session cookies) or download fresh
+        let manifest_path = match prepare_manifest(
+            manifest_body_from_ext,
             &manifest_url_clone,
             &user_agent_clone,
             &referer_clone,
@@ -253,6 +262,25 @@ fn cors_headers_header() -> Header {
     Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap()
 }
 
+/// Use browser-provided manifest body or download fresh, then clean it
+fn prepare_manifest(
+    body_from_ext: Option<String>,
+    url: &str,
+    user_agent: &str,
+    referer: &str,
+    output_dir: &std::path::Path,
+) -> Result<String, String> {
+    let content = if let Some(body) = body_from_ext {
+        log::log(&format!("Using browser-provided manifest ({} bytes)", body.len()));
+        body
+    } else {
+        log::log("Downloading manifest with curl...");
+        download_and_clean_manifest(url, user_agent, referer, output_dir)?;
+        return Ok(output_dir.join("manifest_clean.m3u8").to_string_lossy().to_string());
+    };
+    clean_manifest_content(content, url, output_dir)
+}
+
 /// Download manifest and filter out ad/tracking URLs
 fn download_and_clean_manifest(
     url: &str,
@@ -264,24 +292,25 @@ fn download_and_clean_manifest(
 
     // Download manifest using curl
     let mut cmd = Command::new("curl");
-    cmd.args([
-        "-s",
-        "-L",
-        "-A",
-        user_agent,
-        "-H",
-        &format!("Referer: {}", referer),
-        url,
-    ]);
+    cmd.args(["-s", "-L", "-A", user_agent, "-H", &format!("Referer: {}", referer), url]);
 
     let output = cmd.output().map_err(|e| format!("curl failed: {}", e))?;
-
     if !output.status.success() {
         return Err(format!("curl exited with status: {}", output.status));
     }
 
     let manifest_content =
         String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8: {}", e))?;
+
+    clean_manifest_content(manifest_content, url, output_dir)
+}
+
+/// Clean manifest content: filter ads, resolve relative URLs, save to temp file
+fn clean_manifest_content(
+    manifest_content: String,
+    url: &str,
+    output_dir: &std::path::Path,
+) -> Result<String, String> {
 
     // Save original manifest for debugging
     let original_manifest_path = output_dir.join("manifest_original.m3u8");
