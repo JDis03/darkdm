@@ -267,7 +267,6 @@ fn download_segments_and_concat(
     output_path: &str,
     work_dir: &std::path::Path,
 ) {
-    // Parse segment URLs from manifest
     let base = if let Some(pos) = base_url.rfind('/') { &base_url[..=pos] } else { base_url };
     let segments: Vec<String> = manifest_content.lines()
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
@@ -277,80 +276,53 @@ fn download_segments_and_concat(
         })
         .collect();
 
-    if segments.is_empty() {
-        log::log("No segments found in manifest");
-        return;
-    }
+    if segments.is_empty() { log::log("No segments"); return; }
 
-    // Download first segment to verify it's actual video (not a PNG placeholder)
     let seg_dir = work_dir.join("_segments");
     let _ = std::fs::create_dir_all(&seg_dir);
-    
-    let first_url = &segments[0];
-    let test_file = seg_dir.join("_test");
-    let test_status = Command::new("curl")
-        .args(["-s", "-L", "-o", test_file.to_str().unwrap_or(""),
-               "-A", user_agent, "-H", &format!("Referer: {}", referer),
-               "-w", "%{content_type}", first_url])
-        .output();
 
-    if let Ok(o) = test_status {
-        let ct = String::from_utf8_lossy(&o.stdout);
-        if ct.contains("image/png") || ct.contains("image/jpeg") || ct.contains("image/gif") {
-            log::log(&format!("ERROR: Segments are images ({}), not video. Site uses proprietary format (TikTok ImageX). Cannot download.", ct));
-            let _ = std::fs::remove_dir_all(&seg_dir);
-            return;
-        }
+    // Download first segment to detect PNG wrapper
+    let test_path = seg_dir.join("_test.bin");
+    let _ = Command::new("curl").args(["-s","-L","-o",test_path.to_str().unwrap_or(""),
+        "-A",user_agent,"-H",&format!("Referer: {}",referer),&segments[0]]).status();
+    
+    let test_data = std::fs::read(&test_path).unwrap_or_default();
+    let is_png = test_data.len() > 4 && &test_data[0..4] == b"\x89PNG";
+    let strip_bytes = if is_png {
+        test_data.windows(4).position(|w| w == b"IEND").map(|p| p + 12).unwrap_or(0)
+    } else { 0 };
+    let _ = std::fs::remove_file(&test_path);
+
+    if is_png && strip_bytes > 0 {
+        log::log(&format!("PNG-wrapped segments (TikTok ImageX), stripping {}B wrapper", strip_bytes));
     }
-    let _ = std::fs::remove_file(&test_file);
 
     log::log(&format!("Downloading {} segments...", segments.len()));
-
-    // Download all segments
-    let concat_file = seg_dir.join("_concat.txt");
-    let mut concat_list = String::new();
     let total = segments.len();
-    
+    let mut output = match std::fs::File::create(output_path) {
+        Ok(f) => f,
+        Err(e) => { log::log(&format!("Cannot create output: {}", e)); return; }
+    };
+    use std::io::Write;
+
+    let tmp = seg_dir.join("_cur.bin");
     for (i, seg_url) in segments.iter().enumerate() {
-        let seg_name = format!("{:05}.ts", i);
-        let seg_path = seg_dir.join(&seg_name);
-        let status = Command::new("curl")
-            .args(["-s", "-L", "-o", seg_path.to_str().unwrap_or(""),
-                   "-A", user_agent, "-H", &format!("Referer: {}", referer), seg_url])
-            .status();
-        
-        if let Ok(s) = status {
-            if s.success() {
-                concat_list.push_str(&format!("file '{}'\n", seg_name));
-            } else {
-                log::log(&format!("Segment {} failed", i));
+        let s = Command::new("curl").args(["-s","-L","-o",tmp.to_str().unwrap_or(""),
+            "-A",user_agent,"-H",&format!("Referer: {}",referer),seg_url]).status();
+        if let Ok(st) = s {
+            if st.success() {
+                if let Ok(d) = std::fs::read(&tmp) {
+                    let payload = if strip_bytes > 0 && d.len() > strip_bytes { &d[strip_bytes..] } else { &d };
+                    let _ = output.write_all(payload);
+                }
             }
         }
-        
-        if i % 100 == 0 {
-            log::log(&format!("Progress: {}/{}", i, total));
-        }
+        if i % 200 == 0 { log::log(&format!("Progress: {}/{}", i, total)); }
     }
-    
-    std::fs::write(&concat_file, &concat_list).unwrap_or_default();
-    
-    // Concatenate with ffmpeg concat demuxer (handles PTS, headers, codecs correctly)
-    log::log("Concatenating with ffmpeg concat demuxer...");
-    let status = Command::new("ffmpeg")
-        .args(["-y", "-f", "concat", "-safe", "0",
-               "-i", concat_file.to_str().unwrap_or(""),
-               "-c", "copy", output_path])
-        .status();
-    
+
     let _ = std::fs::remove_dir_all(&seg_dir);
-    
-    match status {
-        Ok(s) if s.success() => {
-            let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
-            log::log(&format!("Concat OK: {} bytes -> {}", size, output_path));
-        }
-        _ => log::log("Concat failed"),
-    }
+    let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+    log::log(&format!("Done: {} segments, {} bytes (stripped {}B wrapper)", total, size, strip_bytes));
 }
 
 /// Use browser-provided manifest body or download fresh, then clean it
