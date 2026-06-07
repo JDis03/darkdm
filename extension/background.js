@@ -59,7 +59,6 @@ chrome.webRequest.onSendHeaders.addListener(function(details) {
         
         // Detect if manifest is mostly ads (TikTok CDN etc.)
         var urlLines = body.split('\n').filter(function(l) { return l.startsWith('http'); });
-        var adDomains = ['tiktokcdn.com', 'doubleclick.net', 'googlesyndication.com', 'fbcdn.net'];
         var isAd = urlLines.length > 0 && urlLines.filter(function(l) {
           return adDomains.some(function(d) { return l.includes(d); });
         }).length / urlLines.length > 0.5;

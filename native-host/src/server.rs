@@ -258,8 +258,7 @@ fn cors_headers_header() -> Header {
     Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap()
 }
 
-/// Download each HLS segment with curl and concatenate into output file
-/// Used when ffmpeg can't handle the segment URLs (e.g. no file extension)
+/// Download each HLS segment and concatenate with ffmpeg concat demuxer (not raw cat)
 fn download_segments_and_concat(
     manifest_content: &str,
     base_url: &str,
@@ -283,52 +282,75 @@ fn download_segments_and_concat(
         return;
     }
 
-    log::log(&format!("Downloading {} segments...", segments.len()));
-
+    // Download first segment to verify it's actual video (not a PNG placeholder)
     let seg_dir = work_dir.join("_segments");
     let _ = std::fs::create_dir_all(&seg_dir);
+    
+    let first_url = &segments[0];
+    let test_file = seg_dir.join("_test");
+    let test_status = Command::new("curl")
+        .args(["-s", "-L", "-o", test_file.to_str().unwrap_or(""),
+               "-A", user_agent, "-H", &format!("Referer: {}", referer),
+               "-w", "%{content_type}", first_url])
+        .output();
 
-    // Download segments in parallel batches of 8
+    if let Ok(o) = test_status {
+        let ct = String::from_utf8_lossy(&o.stdout);
+        if ct.contains("image/png") || ct.contains("image/jpeg") || ct.contains("image/gif") {
+            log::log(&format!("ERROR: Segments are images ({}), not video. Site uses proprietary format (TikTok ImageX). Cannot download.", ct));
+            let _ = std::fs::remove_dir_all(&seg_dir);
+            return;
+        }
+    }
+    let _ = std::fs::remove_file(&test_file);
+
+    log::log(&format!("Downloading {} segments...", segments.len()));
+
+    // Download all segments
+    let concat_file = seg_dir.join("_concat.txt");
+    let mut concat_list = String::new();
     let total = segments.len();
+    
     for (i, seg_url) in segments.iter().enumerate() {
-        let seg_path = seg_dir.join(format!("{:05}.seg", i));
+        let seg_name = format!("{:05}.ts", i);
+        let seg_path = seg_dir.join(&seg_name);
         let status = Command::new("curl")
-            .args([
-                "-s", "-L", "-o", seg_path.to_str().unwrap_or(""),
-                "-A", user_agent,
-                "-H", &format!("Referer: {}", referer),
-                seg_url,
-            ])
+            .args(["-s", "-L", "-o", seg_path.to_str().unwrap_or(""),
+                   "-A", user_agent, "-H", &format!("Referer: {}", referer), seg_url])
             .status();
-
+        
         if let Ok(s) = status {
-            if !s.success() {
+            if s.success() {
+                concat_list.push_str(&format!("file '{}'\n", seg_name));
+            } else {
                 log::log(&format!("Segment {} failed", i));
             }
         }
-
-        if i % 50 == 0 {
+        
+        if i % 100 == 0 {
             log::log(&format!("Progress: {}/{}", i, total));
         }
     }
-
-    log::log("All segments downloaded, concatenating...");
-
-    // Concatenate all segments into output file
-    let mut output = std::fs::File::create(output_path).expect("create output");
-    for i in 0..total {
-        let seg_path = seg_dir.join(format!("{:05}.seg", i));
-        if let Ok(data) = std::fs::read(&seg_path) {
-            use std::io::Write;
-            let _ = output.write_all(&data);
-        }
-    }
-
-    // Cleanup segment files
+    
+    std::fs::write(&concat_file, &concat_list).unwrap_or_default();
+    
+    // Concatenate with ffmpeg concat demuxer (handles PTS, headers, codecs correctly)
+    log::log("Concatenating with ffmpeg concat demuxer...");
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-f", "concat", "-safe", "0",
+               "-i", concat_file.to_str().unwrap_or(""),
+               "-c", "copy", output_path])
+        .status();
+    
     let _ = std::fs::remove_dir_all(&seg_dir);
-
-    let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
-    log::log(&format!("Concat done: {} bytes -> {}", size, output_path));
+    
+    match status {
+        Ok(s) if s.success() => {
+            let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+            log::log(&format!("Concat OK: {} bytes -> {}", size, output_path));
+        }
+        _ => log::log("Concat failed"),
+    }
 }
 
 /// Use browser-provided manifest body or download fresh, then clean it
