@@ -281,11 +281,10 @@ fn download_segments_and_concat(
     let seg_dir = work_dir.join("_segments");
     let _ = std::fs::create_dir_all(&seg_dir);
 
-    // Download first segment to detect PNG wrapper
+    // Detect PNG wrapper
     let test_path = seg_dir.join("_test.bin");
     let _ = Command::new("curl").args(["-s","-L","-o",test_path.to_str().unwrap_or(""),
         "-A",user_agent,"-H",&format!("Referer: {}",referer),&segments[0]]).status();
-    
     let test_data = std::fs::read(&test_path).unwrap_or_default();
     let is_png = test_data.len() > 4 && &test_data[0..4] == b"\x89PNG";
     let strip_bytes = if is_png {
@@ -294,18 +293,15 @@ fn download_segments_and_concat(
     let _ = std::fs::remove_file(&test_path);
 
     if is_png && strip_bytes > 0 {
-        log::log(&format!("PNG-wrapped segments (TikTok ImageX), stripping {}B wrapper", strip_bytes));
+        log::log(&format!("PNG-wrapped (TikTok ImageX), stripping {}B wrapper", strip_bytes));
     }
 
+    // Download segments, strip PNG, save as .ts files
     log::log(&format!("Downloading {} segments...", segments.len()));
     let total = segments.len();
-    let mut output = match std::fs::File::create(output_path) {
-        Ok(f) => f,
-        Err(e) => { log::log(&format!("Cannot create output: {}", e)); return; }
-    };
-    use std::io::Write;
-
     let tmp = seg_dir.join("_cur.bin");
+    let mut concat_list = String::new();
+
     for (i, seg_url) in segments.iter().enumerate() {
         let s = Command::new("curl").args(["-s","-L","-o",tmp.to_str().unwrap_or(""),
             "-A",user_agent,"-H",&format!("Referer: {}",referer),seg_url]).status();
@@ -313,16 +309,40 @@ fn download_segments_and_concat(
             if st.success() {
                 if let Ok(d) = std::fs::read(&tmp) {
                     let payload = if strip_bytes > 0 && d.len() > strip_bytes { &d[strip_bytes..] } else { &d };
-                    let _ = output.write_all(payload);
+                    let seg_name = format!("{:05}.ts", i);
+                    let seg_path = seg_dir.join(&seg_name);
+                    if std::fs::write(&seg_path, payload).is_ok() {
+                        concat_list.push_str(&format!("file '{}'\n", seg_name));
+                    }
                 }
             }
         }
-        if i % 200 == 0 { log::log(&format!("Progress: {}/{}", i, total)); }
+        if i % 300 == 0 { log::log(&format!("Downloading: {}/{}", i, total)); }
     }
 
+    // Write concat list
+    let concat_file = seg_dir.join("_concat.txt");
+    std::fs::write(&concat_file, &concat_list).unwrap_or_default();
+
+    // Use ffmpeg concat demuxer with genpts to fix timestamp discontinuities
+    log::log("Concatenating with ffmpeg (fixing timestamps)...");
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-f", "concat", "-safe", "0",
+               "-fflags", "+genpts",
+               "-i", concat_file.to_str().unwrap_or(""),
+               "-c", "copy", output_path])
+        .status();
+
     let _ = std::fs::remove_dir_all(&seg_dir);
-    let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
-    log::log(&format!("Done: {} segments, {} bytes (stripped {}B wrapper)", total, size, strip_bytes));
+
+    match status {
+        Ok(s) if s.success() => {
+            let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+            log::log(&format!("Concat OK: {} bytes -> {}", size, output_path));
+        }
+        Ok(s) => log::log(&format!("Concat failed: {}", s)),
+        Err(e) => log::log(&format!("Concat error: {}", e)),
+    }
 }
 
 /// Use browser-provided manifest body or download fresh, then clean it
