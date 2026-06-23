@@ -18,15 +18,12 @@ done
 
 URL="${POSITIONAL[0]}"
 OUTDIR="${POSITIONAL[1]:-$HOME/Descargas/MediaFire/Video}"
+
+if [ -z "$URL" ] || [ "${URL:0:4}" != "http" ]; then
     echo "Usage: darkdm-mediafire <url> [output-dir] [--password <pass>]"
-    echo "Descarga de MediaFire, extrae y copia solo el video al destino"
-    echo ""
-    echo "Ejemplos:"
-    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies"
-    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies --password 1234"
+    echo "Ejemplo: darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies --password 1234"
     exit 1
 fi
-
 TMPDIR="/tmp/darkdm_mediafire_$$"
 mkdir -p "$TMPDIR" "$OUTDIR"
 
