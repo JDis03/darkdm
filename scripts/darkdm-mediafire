@@ -1,9 +1,6 @@
 #!/bin/bash
 # darkdm-mediafire — Download from MediaFire, extract, and copy only the video to Jellyfin
 # Usage: darkdm-mediafire <url> [output-dir] [--password <pass>]
-# Example: darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies --password 1234
-
-set -e
 
 URL="${1}"
 OUTDIR="${2:-$HOME/Descargas/MediaFire/Video}"
@@ -20,39 +17,45 @@ URL="${POSITIONAL[0]}"
 OUTDIR="${POSITIONAL[1]:-$HOME/Descargas/MediaFire/Video}"
 
 if [ -z "$URL" ] || [ "${URL:0:4}" != "http" ]; then
-    echo "Usage: darkdm-mediafire <url> [output-dir] [--password <pass>]"
-    echo "Ejemplo: darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies --password 1234"
+    echo "Uso: darkdm-mediafire <url> [output-dir] [--password <pass>]"
+    echo "Ej: darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies --password 1234"
     exit 1
 fi
+
 TMPDIR="/tmp/darkdm_mediafire_$$"
 mkdir -p "$TMPDIR" "$OUTDIR"
 
 echo "🔗 Obteniendo enlace de descarga..."
-PAGE=$(curl -s -L -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" "$URL")
+PAGE=$(curl -s -L --max-time 15 \
+    -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" \
+    "$URL" 2>/dev/null) || {
+    echo "❌ Error al conectar con MediaFire (timeout 15s)"
+    rmdir "$TMPDIR" 2>/dev/null; exit 1
+}
 
 DIRECT_URL=$(echo "$PAGE" | grep -oP 'href="\Khttps://download[0-9]+\.mediafire\.com[^"]+' | head -1)
 if [ -z "$DIRECT_URL" ]; then
     DIRECT_URL=$(echo "$PAGE" | grep -oP 'downloadButton\.href\s*=\s*"\K[^"]+')
 fi
 if [ -z "$DIRECT_URL" ]; then
-    echo "❌ No se pudo encontrar el enlace de descarga"
-    rm -rf "$TMPDIR"
-    exit 1
+    echo "❌ No se pudo encontrar el enlace de descarga en la página"
+    rm -rf "$TMPDIR"; exit 1
 fi
 
 FILENAME=$(basename "$DIRECT_URL" | sed 's/?.*//')
-BASENAME="${FILENAME%.*}"
-
 echo "📄 Archivo: $FILENAME"
 echo "⬇️  Descargando..."
-curl -L -o "$TMPDIR/$FILENAME" -C - \
+curl -L -o "$TMPDIR/$FILENAME" -C - --max-time 180 --connect-timeout 15 \
     -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" \
-    --progress-bar "$DIRECT_URL"
+    --progress-bar "$DIRECT_URL" || {
+    echo ""
+    echo "❌ Descarga falló (timeout 3min)"
+    rm -rf "$TMPDIR"; exit 1
+}
 
 SIZE=$(stat -c%s "$TMPDIR/$FILENAME" 2>/dev/null | numfmt --to=iec || echo "?")
 echo "✅ Descarga completa ($SIZE)"
 
-# Extract based on extension
 EXTRACTED=false
 case "${FILENAME,,}" in
     *.rar)
@@ -60,7 +63,10 @@ case "${FILENAME,,}" in
         if [ -n "$PASSWORD" ]; then
             unrar x -y -p"$PASSWORD" "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null && EXTRACTED=true
         else
-            unrar x -y "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null || unrar x -y -p- "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null && EXTRACTED=true
+            (unrar x -y "$TMPDIR/$FILENAME" "$TMPDIR/" || unrar x -y -p- "$TMPDIR/$FILENAME" "$TMPDIR/") &>/dev/null && EXTRACTED=true
+        fi
+        if [ "$EXTRACTED" = false ]; then
+            echo "⚠️  RAR protegido o corrupto. Usa --password si tiene clave."
         fi
         ;;
     *.zip)
@@ -82,30 +88,29 @@ case "${FILENAME,,}" in
 esac
 
 if [ "$EXTRACTED" = false ]; then
-    echo "⚠️  No se extrajo o extensión no reconocida, moviendo archivo original..."
+    echo "📁 Moviendo archivo original al destino..."
     mv "$TMPDIR/$FILENAME" "$OUTDIR/"
     rm -rf "$TMPDIR"
     echo "✅ Archivo en $OUTDIR/$FILENAME"
     exit 0
 fi
 
-# Find video files (only .ts if from HLS concat isn't applicable here; videos are MP4/MKV/AVI/WEBM)
+# Find video files
 VIDEOS=()
 while IFS= read -r f; do
     VIDEOS+=("$f")
-done < <(find "$TMPDIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" -o -iname "*.webm" -o -iname "*.mov" \) 2>/dev/null)
+done < <(find "$TMPDIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" \
+    -o -iname "*.webm" -o -iname "*.mov" \) 2>/dev/null)
 
 if [ ${#VIDEOS[@]} -eq 0 ]; then
-    echo "⚠️  No se encontraron archivos de video en la extracción."
-    echo "   Moviendo todo el contenido extraído..."
+    echo "⚠️  No se encontraron videos, moviendo todo extraído..."
     mkdir -p "$OUTDIR/$BASENAME"
     find "$TMPDIR" -maxdepth 1 -type f ! -name "$FILENAME" -exec mv {} "$OUTDIR/$BASENAME/" \;
     rm -rf "$TMPDIR"
-    echo "✅ Contenido extraído en $OUTDIR/$BASENAME/"
+    echo "✅ Contenido en $OUTDIR/$BASENAME/"
     exit 0
 fi
 
-# Copy videos to output directory
 echo "🎬 Videos encontrados: ${#VIDEOS[@]}"
 for VIDEO in "${VIDEOS[@]}"; do
     VNAME=$(basename "$VIDEO")
@@ -113,9 +118,6 @@ for VIDEO in "${VIDEOS[@]}"; do
     mv "$VIDEO" "$OUTDIR/"
 done
 
-# Cleanup
 rm -rf "$TMPDIR"
-
-echo ""
-echo "✅ Listo. Video(s) en $OUTDIR/:"
+echo "✅ Video(s) en $OUTDIR/:"
 ls -lah "$OUTDIR/" | tail -5
