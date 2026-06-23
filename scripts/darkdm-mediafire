@@ -23,7 +23,7 @@ while [ $# -gt 0 ]; do
 done
 
 URL="${POSITIONAL[0]}"
-OUTDIR="${POSITIONAL[1]:-$HOME/Descargas/MediaFire/Video}"
+OUTDIR="${POSITIONAL[1]:-$HOME/Descargas/DarkDM}"
 
 if [ -z "$URL" ] || [ "${URL:0:4}" != "http" ]; then
     echo "Uso: darkdm-mediafire <url> [output-dir] [opciones]"
