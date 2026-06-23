@@ -122,12 +122,13 @@ FILENAME=$(basename "$DIRECT_URL" | sed 's/?.*//')
 echo "📄 Archivo: $FILENAME"
 echo "⬇️  Descargando en $OUTDIR/..."
 
-curl -L -o "$TMPDIR_DL/$FILENAME" -C - --max-time 600 --connect-timeout 15 \
+curl -L -o "$TMPDIR_DL/$FILENAME" -C - --max-time 3600 --connect-timeout 30 \
     --compressed \
     -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
     --progress-bar "$DIRECT_URL" || {
     echo ""
-    echo "❌ Descarga falló"
+    echo "❌ Descarga falló (timeout 1h o error de conexión)"
+    echo "   → Reintenta: curl soporta -C - para continuar descargas"
     rm -rf "$TMPDIR_DL"; exit 1
 }
 
