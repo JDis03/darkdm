@@ -109,8 +109,8 @@ else
     DIRECT_URL=$(extract_mediafire_link "$URL")
     if [ -z "$DIRECT_URL" ]; then
         echo "❌ No se encontró enlace directo en la página."
-        echo "   → Comprueba que el archivo existe y que la URL termina en /file"
-        echo "   → Alternativa: darkdm-mediafire --direct <enlace_directo>"
+        echo "   → Verifica que el archivo existe y la URL termina en /file"
+        echo "   → Si tienes el enlace directo: darkdm-mediafire --direct <enlace>"
         rm -rf "$TMPDIR_DL"; exit 1
     fi
     echo "✅ Enlace encontrado"
