@@ -168,31 +168,34 @@ case "${FILENAME,,}" in
         ;;
 esac
 
+# Siempre guardar el archivo original en OUTDIR (nunca se pierde)
+cp "$TMPDIR_DL/$FILENAME" "$OUTDIR/$FILENAME" 2>/dev/null
+echo "💾 Archivo original guardado en: $OUTDIR/$FILENAME"
+
 if [ "$EXTRACTED" = false ]; then
-    mv "$TMPDIR_DL/$FILENAME" "$OUTDIR/"
     rm -rf "$TMPDIR_DL"
-    echo "✅ Archivo guardado en: $OUTDIR/$FILENAME"
+    echo "✅ Listo. Archivo en: $OUTDIR/$FILENAME"
     exit 0
 fi
 
 # ============================================================
-# Mover videos al destino
+# Mover contenido extraído al destino
 # ============================================================
 BASENAME="${FILENAME%.*}"
 VIDEOS=()
 while IFS= read -r f; do
     VIDEOS+=("$f")
-done < <(find "$TMPDIR_DL" -type f \( \
+done < <(find "$TMPDIR_DL" -type f ! -name "$FILENAME" \( \
     -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" \
     -o -iname "*.webm" -o -iname "*.mov" -o -iname "*.m4v" \
     \) 2>/dev/null)
 
 if [ ${#VIDEOS[@]} -eq 0 ]; then
-    echo "⚠️  No hay videos en el archivo, moviendo todo el contenido..."
+    echo "⚠️  No hay videos en el archivo, moviendo todo el contenido extraído..."
     mkdir -p "$OUTDIR/$BASENAME"
     find "$TMPDIR_DL" -maxdepth 2 -type f ! -name "$FILENAME" -exec mv {} "$OUTDIR/$BASENAME/" \;
     rm -rf "$TMPDIR_DL"
-    echo "✅ Contenido en: $OUTDIR/$BASENAME/"
+    echo "✅ Contenido extraído en: $OUTDIR/$BASENAME/"
     exit 0
 fi
 
@@ -205,5 +208,5 @@ for VIDEO in "${VIDEOS[@]}"; do
 done
 
 rm -rf "$TMPDIR_DL"
-echo "✅ Listo. Videos en: $OUTDIR/"
-ls -lah "$OUTDIR/" | tail -6
+echo "✅ Listo. Todo en: $OUTDIR/"
+ls -lah "$OUTDIR/" | tail -8
