@@ -1,16 +1,24 @@
 #!/bin/bash
-# darkdm-mediafire — Download from MediaFire, extract, and copy only the video to Jellyfin
-# Usage: darkdm-mediafire <url> [output-dir] [--password <pass>]
+# darkdm-mediafire — Extrae enlace de MediaFire y descarga/extrae archivos
+# Usage: darkdm-mediafire <url> [output-dir] [--password <pass>] [--get-link]
 #        darkdm-mediafire --direct <direct_url> [output-dir] [--password <pass>]
+#
+# Flags:
+#   --get-link      Solo imprime el enlace directo de descarga (sin descargar)
+#   --direct <url>  Usa directamente un enlace de descarga sin parsear la página
+#   --password <p>  Contraseña para descomprimir archivos protegidos
 
 DIRECT_MODE=false
+GET_LINK_ONLY=false
 PASSWORD=""
 POSITIONAL=()
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --password) PASSWORD="$2"; shift 2 ;;
-        --direct) DIRECT_MODE=true; shift ;;
-        *) POSITIONAL+=("$1"); shift ;;
+        --direct)   DIRECT_MODE=true; shift ;;
+        --get-link) GET_LINK_ONLY=true; shift ;;
+        *)          POSITIONAL+=("$1"); shift ;;
     esac
 done
 
@@ -18,112 +26,184 @@ URL="${POSITIONAL[0]}"
 OUTDIR="${POSITIONAL[1]:-$HOME/Descargas/MediaFire/Video}"
 
 if [ -z "$URL" ] || [ "${URL:0:4}" != "http" ]; then
-    echo "Uso: darkdm-mediafire <url> [output-dir] [--password <pass>]"
-    echo "Ej: darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies --password 1234"
+    echo "Uso: darkdm-mediafire <url> [output-dir] [opciones]"
+    echo ""
+    echo "Opciones:"
+    echo "  --get-link          Solo muestra el enlace directo de descarga"
+    echo "  --direct <url>      Usa un enlace directo sin parsear la página"
+    echo "  --password <pass>   Contraseña para descomprimir"
+    echo ""
+    echo "Ejemplos:"
+    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar/file' --get-link"
+    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar/file' ~/Descargas"
+    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar/file' --password 1234"
     exit 1
 fi
 
-TMPDIR="/tmp/darkdm_mediafire_$$"
-mkdir -p "$TMPDIR" "$OUTDIR"
+# ============================================================
+# Extrae el enlace directo de una página de MediaFire
+# ============================================================
+extract_mediafire_link() {
+    local page_url="$1"
+
+    local PAGE
+    PAGE=$(curl -s -L --compressed --max-time 20 \
+        -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
+        -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+        -H "Accept-Language: en-US,en;q=0.5" \
+        "$page_url" 2>/dev/null) || return 1
+
+    local DIRECT_URL=""
+
+    # Patrón 1: href junto a id="downloadButton" (estructura actual de MediaFire)
+    DIRECT_URL=$(echo "$PAGE" | grep -oP 'href="\Khttps://download[0-9]+\.mediafire\.com[^"]+(?="[^>]*id="downloadButton")' | head -1)
+
+    # Patrón 2: línea que contiene id="downloadButton" — extraer href
+    if [ -z "$DIRECT_URL" ]; then
+        DIRECT_URL=$(echo "$PAGE" | grep 'id="downloadButton"' | grep -oP 'href="\Khttps://[^"]+' | head -1)
+    fi
+
+    # Patrón 3: cualquier download*.mediafire.com en la página (fallback)
+    if [ -z "$DIRECT_URL" ]; then
+        DIRECT_URL=$(echo "$PAGE" | grep -oP 'href="\Khttps://download[0-9]+\.mediafire\.com[^"]+' | head -1)
+    fi
+
+    # Patrón 4: downloadButton.href = "..." (JS inline)
+    if [ -z "$DIRECT_URL" ]; then
+        DIRECT_URL=$(echo "$PAGE" | grep -oP 'downloadButton\.href\s*=\s*"\K[^"]+')
+    fi
+
+    echo "$DIRECT_URL"
+}
+
+# ============================================================
+# Modo --get-link: solo imprime el enlace directo
+# ============================================================
+if [ "$GET_LINK_ONLY" = true ]; then
+    if [ "$DIRECT_MODE" = true ]; then
+        echo "$URL"
+        exit 0
+    fi
+    echo "🔍 Extrayendo enlace de: $URL" >&2
+    DIRECT_URL=$(extract_mediafire_link "$URL")
+    if [ -z "$DIRECT_URL" ]; then
+        echo "❌ No se encontró enlace directo en la página." >&2
+        echo "   → ¿La URL es correcta? ¿El archivo sigue disponible?" >&2
+        exit 1
+    fi
+    echo "$DIRECT_URL"
+    exit 0
+fi
+
+# ============================================================
+# Modo descarga normal
+# ============================================================
+TMPDIR_DL="/tmp/darkdm_mediafire_$$"
+mkdir -p "$TMPDIR_DL" "$OUTDIR"
 
 if [ "$DIRECT_MODE" = true ]; then
     echo "🔗 Usando enlace directo..."
     DIRECT_URL="$URL"
 else
-    echo "🔗 Obteniendo enlace de descarga..."
-    PAGE=$(curl -s -L --max-time 15 \
-        -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" \
-        "$URL" 2>/dev/null) || {
-        echo "❌ Error al conectar (timeout 15s)"
-        rmdir "$TMPDIR" 2>/dev/null; exit 1
-    }
-    DIRECT_URL=$(echo "$PAGE" | grep -oP 'href="\Khttps://download[0-9]+\.mediafire\.com[^"]+' | head -1)
+    echo "🔍 Obteniendo enlace de descarga de MediaFire..."
+    DIRECT_URL=$(extract_mediafire_link "$URL")
     if [ -z "$DIRECT_URL" ]; then
-        DIRECT_URL=$(echo "$PAGE" | grep -oP 'downloadButton\.href\s*=\s*"\K[^"]+')
+        echo "❌ No se encontró enlace directo en la página."
+        echo "   → Comprueba que el archivo existe y que la URL termina en /file"
+        echo "   → Alternativa: darkdm-mediafire --direct <enlace_directo>"
+        rm -rf "$TMPDIR_DL"; exit 1
     fi
-    if [ -z "$DIRECT_URL" ]; then
-        echo "❌ No se encontró enlace en la página."
-        echo "   → Usa --direct <enlace_directo> con el link que IDM extrajo"
-        rm -rf "$TMPDIR"; exit 1
-    fi
+    echo "✅ Enlace encontrado"
 fi
+
+echo "🔗 $DIRECT_URL"
 
 FILENAME=$(basename "$DIRECT_URL" | sed 's/?.*//')
 echo "📄 Archivo: $FILENAME"
-echo "⬇️  Descargando..."
-curl -L -o "$TMPDIR/$FILENAME" -C - --max-time 180 --connect-timeout 15 \
-    -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" \
+echo "⬇️  Descargando en $OUTDIR/..."
+
+curl -L -o "$TMPDIR_DL/$FILENAME" -C - --max-time 600 --connect-timeout 15 \
+    --compressed \
+    -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
     --progress-bar "$DIRECT_URL" || {
     echo ""
-    echo "❌ Descarga falló (timeout 3min)"
-    rm -rf "$TMPDIR"; exit 1
+    echo "❌ Descarga falló"
+    rm -rf "$TMPDIR_DL"; exit 1
 }
 
-SIZE=$(stat -c%s "$TMPDIR/$FILENAME" 2>/dev/null | numfmt --to=iec || echo "?")
+SIZE=$(stat -c%s "$TMPDIR_DL/$FILENAME" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo "?")
+echo ""
 echo "✅ Descarga completa ($SIZE)"
 
+# ============================================================
+# Extracción de comprimidos
+# ============================================================
 EXTRACTED=false
 case "${FILENAME,,}" in
     *.rar)
         echo "📦 Extrayendo RAR...${PASSWORD:+ (con contraseña)}"
         if [ -n "$PASSWORD" ]; then
-            unrar x -y -p"$PASSWORD" "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null && EXTRACTED=true
+            unrar x -y -p"$PASSWORD" "$TMPDIR_DL/$FILENAME" "$TMPDIR_DL/" &>/dev/null && EXTRACTED=true
         else
-            (unrar x -y "$TMPDIR/$FILENAME" "$TMPDIR/" || unrar x -y -p- "$TMPDIR/$FILENAME" "$TMPDIR/") &>/dev/null && EXTRACTED=true
+            (unrar x -y "$TMPDIR_DL/$FILENAME" "$TMPDIR_DL/" || \
+             unrar x -y -p- "$TMPDIR_DL/$FILENAME" "$TMPDIR_DL/") &>/dev/null && EXTRACTED=true
         fi
-        if [ "$EXTRACTED" = false ]; then
-            echo "⚠️  RAR protegido o corrupto. Usa --password si tiene clave."
-        fi
+        [ "$EXTRACTED" = false ] && echo "⚠️  RAR protegido o corrupto. Usa --password si tiene clave."
         ;;
     *.zip)
         echo "📦 Extrayendo ZIP..."
-        unzip -o "$TMPDIR/$FILENAME" -d "$TMPDIR/" &>/dev/null && EXTRACTED=true
+        unzip -o "$TMPDIR_DL/$FILENAME" -d "$TMPDIR_DL/" &>/dev/null && EXTRACTED=true
         ;;
     *.7z)
         echo "📦 Extrayendo 7z..."
-        7z x -y "$TMPDIR/$FILENAME" -o"$TMPDIR/" &>/dev/null && EXTRACTED=true
+        7z x -y "$TMPDIR_DL/$FILENAME" -o"$TMPDIR_DL/" &>/dev/null && EXTRACTED=true
         ;;
     *.tar.gz|*.tgz)
         echo "📦 Extrayendo tar.gz..."
-        tar xzf "$TMPDIR/$FILENAME" -C "$TMPDIR/" && EXTRACTED=true
+        tar xzf "$TMPDIR_DL/$FILENAME" -C "$TMPDIR_DL/" && EXTRACTED=true
         ;;
     *.tar.xz)
         echo "📦 Extrayendo tar.xz..."
-        tar xJf "$TMPDIR/$FILENAME" -C "$TMPDIR/" && EXTRACTED=true
+        tar xJf "$TMPDIR_DL/$FILENAME" -C "$TMPDIR_DL/" && EXTRACTED=true
         ;;
 esac
 
 if [ "$EXTRACTED" = false ]; then
-    echo "📁 Moviendo archivo original al destino..."
-    mv "$TMPDIR/$FILENAME" "$OUTDIR/"
-    rm -rf "$TMPDIR"
-    echo "✅ Archivo en $OUTDIR/$FILENAME"
+    mv "$TMPDIR_DL/$FILENAME" "$OUTDIR/"
+    rm -rf "$TMPDIR_DL"
+    echo "✅ Archivo guardado en: $OUTDIR/$FILENAME"
     exit 0
 fi
 
-# Find video files
+# ============================================================
+# Mover videos al destino
+# ============================================================
+BASENAME="${FILENAME%.*}"
 VIDEOS=()
 while IFS= read -r f; do
     VIDEOS+=("$f")
-done < <(find "$TMPDIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" \
-    -o -iname "*.webm" -o -iname "*.mov" \) 2>/dev/null)
+done < <(find "$TMPDIR_DL" -type f \( \
+    -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" \
+    -o -iname "*.webm" -o -iname "*.mov" -o -iname "*.m4v" \
+    \) 2>/dev/null)
 
 if [ ${#VIDEOS[@]} -eq 0 ]; then
-    echo "⚠️  No se encontraron videos, moviendo todo extraído..."
+    echo "⚠️  No hay videos en el archivo, moviendo todo el contenido..."
     mkdir -p "$OUTDIR/$BASENAME"
-    find "$TMPDIR" -maxdepth 1 -type f ! -name "$FILENAME" -exec mv {} "$OUTDIR/$BASENAME/" \;
-    rm -rf "$TMPDIR"
-    echo "✅ Contenido en $OUTDIR/$BASENAME/"
+    find "$TMPDIR_DL" -maxdepth 2 -type f ! -name "$FILENAME" -exec mv {} "$OUTDIR/$BASENAME/" \;
+    rm -rf "$TMPDIR_DL"
+    echo "✅ Contenido en: $OUTDIR/$BASENAME/"
     exit 0
 fi
 
 echo "🎬 Videos encontrados: ${#VIDEOS[@]}"
 for VIDEO in "${VIDEOS[@]}"; do
     VNAME=$(basename "$VIDEO")
-    echo "   → $VNAME ($(stat -c%s "$VIDEO" | numfmt --to=iec))"
+    VSIZE=$(stat -c%s "$VIDEO" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo "?")
+    echo "   → $VNAME ($VSIZE)"
     mv "$VIDEO" "$OUTDIR/"
 done
 
-rm -rf "$TMPDIR"
-echo "✅ Video(s) en $OUTDIR/:"
-ls -lah "$OUTDIR/" | tail -5
+rm -rf "$TMPDIR_DL"
+echo "✅ Listo. Videos en: $OUTDIR/"
+ls -lah "$OUTDIR/" | tail -6
