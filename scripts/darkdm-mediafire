@@ -1,20 +1,29 @@
 #!/bin/bash
 # darkdm-mediafire — Download from MediaFire, extract, and copy only the video to Jellyfin
-# Usage: darkdm-mediafire <url> [output-dir]
-# Example: darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies
+# Usage: darkdm-mediafire <url> [output-dir] [--password <pass>]
+# Example: darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies --password 1234
 
 set -e
 
 URL="${1}"
 OUTDIR="${2:-$HOME/Descargas/MediaFire/Video}"
+PASSWORD=""
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --password) PASSWORD="$2"; shift 2 ;;
+        *) POSITIONAL+=("$1"); shift ;;
+    esac
+done
 
-if [ -z "$URL" ]; then
-    echo "Usage: darkdm-mediafire <url> [output-dir]"
+URL="${POSITIONAL[0]}"
+OUTDIR="${POSITIONAL[1]:-$HOME/Descargas/MediaFire/Video}"
+    echo "Usage: darkdm-mediafire <url> [output-dir] [--password <pass>]"
     echo "Descarga de MediaFire, extrae y copia solo el video al destino"
     echo ""
     echo "Ejemplos:"
     echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies"
-    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /ruta/jellyfin/media/peliculas"
+    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies --password 1234"
     exit 1
 fi
 
@@ -50,8 +59,12 @@ echo "✅ Descarga completa ($SIZE)"
 EXTRACTED=false
 case "${FILENAME,,}" in
     *.rar)
-        echo "📦 Extrayendo RAR..."
-        unrar x -y "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null || unrar x -y -p- "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null && EXTRACTED=true
+        echo "📦 Extrayendo RAR...${PASSWORD:+ (con contraseña)}"
+        if [ -n "$PASSWORD" ]; then
+            unrar x -y -p"$PASSWORD" "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null && EXTRACTED=true
+        else
+            unrar x -y "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null || unrar x -y -p- "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null && EXTRACTED=true
+        fi
         ;;
     *.zip)
         echo "📦 Extrayendo ZIP..."
