@@ -1,36 +1,36 @@
 #!/bin/bash
-# darkdm-mediafire — Download from MediaFire and auto-extract to Jellyfin media dir
+# darkdm-mediafire — Download from MediaFire, extract, and copy only the video to Jellyfin
 # Usage: darkdm-mediafire <url> [output-dir]
+# Example: darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies
 
 set -e
 
 URL="${1}"
-OUTDIR="${2:-$HOME/Descargas/MediaFire}"
+OUTDIR="${2:-$HOME/Descargas/MediaFire/Video}"
 
 if [ -z "$URL" ]; then
     echo "Usage: darkdm-mediafire <url> [output-dir]"
-    echo "Descarga de MediaFire y extracción automática"
+    echo "Descarga de MediaFire, extrae y copia solo el video al destino"
     echo ""
     echo "Ejemplos:"
-    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar'"
+    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /media/movies"
     echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /ruta/jellyfin/media/peliculas"
     exit 1
 fi
 
-mkdir -p "$OUTDIR"
+TMPDIR="/tmp/darkdm_mediafire_$$"
+mkdir -p "$TMPDIR" "$OUTDIR"
 
 echo "🔗 Obteniendo enlace de descarga..."
 PAGE=$(curl -s -L -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" "$URL")
 
-# Extract direct download URL
 DIRECT_URL=$(echo "$PAGE" | grep -oP 'href="\Khttps://download[0-9]+\.mediafire\.com[^"]+' | head -1)
 if [ -z "$DIRECT_URL" ]; then
-    # fallback: buscar downloadButton
     DIRECT_URL=$(echo "$PAGE" | grep -oP 'downloadButton\.href\s*=\s*"\K[^"]+')
 fi
-
 if [ -z "$DIRECT_URL" ]; then
     echo "❌ No se pudo encontrar el enlace de descarga"
+    rm -rf "$TMPDIR"
     exit 1
 fi
 
@@ -38,66 +38,74 @@ FILENAME=$(basename "$DIRECT_URL" | sed 's/?.*//')
 BASENAME="${FILENAME%.*}"
 
 echo "📄 Archivo: $FILENAME"
-echo "⬇️  Descargando a $OUTDIR/..."
-echo ""
+echo "⬇️  Descargando..."
+curl -L -o "$TMPDIR/$FILENAME" -C - \
+    -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" \
+    --progress-bar "$DIRECT_URL"
 
-curl -L -o "$OUTDIR/$FILENAME" \
-     -C - \
-     -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" \
-     --progress-bar \
-     "$DIRECT_URL"
+SIZE=$(stat -c%s "$TMPDIR/$FILENAME" 2>/dev/null | numfmt --to=iec || echo "?")
+echo "✅ Descarga completa ($SIZE)"
 
-echo ""
-echo "✅ Descarga completa: $OUTDIR/$FILENAME ($(stat -c%s "$OUTDIR/$FILENAME" 2>/dev/null | numfmt --to=iec || echo "?"))"
-
-# Auto-extract based on extension
+# Extract based on extension
+EXTRACTED=false
 case "${FILENAME,,}" in
     *.rar)
         echo "📦 Extrayendo RAR..."
-        unrar x -y "$OUTDIR/$FILENAME" "$OUTDIR/" 2>/dev/null || {
-            # Try with password prompt skip
-            unrar x -y -p- "$OUTDIR/$FILENAME" "$OUTDIR/" 2>/dev/null
-        }
-        if [ $? -eq 0 ]; then
-            rm -f "$OUTDIR/$FILENAME"
-            echo "✅ Extraído y archivo original eliminado"
-        else
-            echo "⚠️  Error extrayendo, el .rar queda en $OUTDIR/"
-        fi
+        unrar x -y "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null || unrar x -y -p- "$TMPDIR/$FILENAME" "$TMPDIR/" &>/dev/null && EXTRACTED=true
         ;;
     *.zip)
         echo "📦 Extrayendo ZIP..."
-        unzip -o "$OUTDIR/$FILENAME" -d "$OUTDIR/"
-        if [ $? -eq 0 ]; then
-            rm -f "$OUTDIR/$FILENAME"
-            echo "✅ Extraído y archivo original eliminado"
-        fi
+        unzip -o "$TMPDIR/$FILENAME" -d "$TMPDIR/" &>/dev/null && EXTRACTED=true
         ;;
     *.7z)
         echo "📦 Extrayendo 7z..."
-        7z x -y "$OUTDIR/$FILENAME" -o"$OUTDIR/"
-        if [ $? -eq 0 ]; then
-            rm -f "$OUTDIR/$FILENAME"
-            echo "✅ Extraído y archivo original eliminado"
-        fi
+        7z x -y "$TMPDIR/$FILENAME" -o"$TMPDIR/" &>/dev/null && EXTRACTED=true
         ;;
     *.tar.gz|*.tgz)
         echo "📦 Extrayendo tar.gz..."
-        tar xzf "$OUTDIR/$FILENAME" -C "$OUTDIR/"
-        rm -f "$OUTDIR/$FILENAME"
-        echo "✅ Extraído"
+        tar xzf "$TMPDIR/$FILENAME" -C "$TMPDIR/" && EXTRACTED=true
         ;;
     *.tar.xz)
         echo "📦 Extrayendo tar.xz..."
-        tar xJf "$OUTDIR/$FILENAME" -C "$OUTDIR/"
-        rm -f "$OUTDIR/$FILENAME"
-        echo "✅ Extraído"
-        ;;
-    *)
-        echo "📁 Extensión no reconocida ($FILENAME), no se extrajo automáticamente"
+        tar xJf "$TMPDIR/$FILENAME" -C "$TMPDIR/" && EXTRACTED=true
         ;;
 esac
 
+if [ "$EXTRACTED" = false ]; then
+    echo "⚠️  No se extrajo o extensión no reconocida, moviendo archivo original..."
+    mv "$TMPDIR/$FILENAME" "$OUTDIR/"
+    rm -rf "$TMPDIR"
+    echo "✅ Archivo en $OUTDIR/$FILENAME"
+    exit 0
+fi
+
+# Find video files (only .ts if from HLS concat isn't applicable here; videos are MP4/MKV/AVI/WEBM)
+VIDEOS=()
+while IFS= read -r f; do
+    VIDEOS+=("$f")
+done < <(find "$TMPDIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" -o -iname "*.webm" -o -iname "*.mov" \) 2>/dev/null)
+
+if [ ${#VIDEOS[@]} -eq 0 ]; then
+    echo "⚠️  No se encontraron archivos de video en la extracción."
+    echo "   Moviendo todo el contenido extraído..."
+    mkdir -p "$OUTDIR/$BASENAME"
+    find "$TMPDIR" -maxdepth 1 -type f ! -name "$FILENAME" -exec mv {} "$OUTDIR/$BASENAME/" \;
+    rm -rf "$TMPDIR"
+    echo "✅ Contenido extraído en $OUTDIR/$BASENAME/"
+    exit 0
+fi
+
+# Copy videos to output directory
+echo "🎬 Videos encontrados: ${#VIDEOS[@]}"
+for VIDEO in "${VIDEOS[@]}"; do
+    VNAME=$(basename "$VIDEO")
+    echo "   → $VNAME ($(stat -c%s "$VIDEO" | numfmt --to=iec))"
+    mv "$VIDEO" "$OUTDIR/"
+done
+
+# Cleanup
+rm -rf "$TMPDIR"
+
 echo ""
-echo "🎬 Contenido final en $OUTDIR/:"
-ls -lah "$OUTDIR/" | tail -10
+echo "✅ Listo. Video(s) en $OUTDIR/:"
+ls -lah "$OUTDIR/" | tail -5
