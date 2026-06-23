@@ -1,14 +1,15 @@
 #!/bin/bash
 # darkdm-mediafire — Download from MediaFire, extract, and copy only the video to Jellyfin
 # Usage: darkdm-mediafire <url> [output-dir] [--password <pass>]
+#        darkdm-mediafire --direct <direct_url> [output-dir] [--password <pass>]
 
-URL="${1}"
-OUTDIR="${2:-$HOME/Descargas/MediaFire/Video}"
+DIRECT_MODE=false
 PASSWORD=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --password) PASSWORD="$2"; shift 2 ;;
+        --direct) DIRECT_MODE=true; shift ;;
         *) POSITIONAL+=("$1"); shift ;;
     esac
 done
@@ -25,21 +26,26 @@ fi
 TMPDIR="/tmp/darkdm_mediafire_$$"
 mkdir -p "$TMPDIR" "$OUTDIR"
 
-echo "🔗 Obteniendo enlace de descarga..."
-PAGE=$(curl -s -L --max-time 15 \
-    -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" \
-    "$URL" 2>/dev/null) || {
-    echo "❌ Error al conectar con MediaFire (timeout 15s)"
-    rmdir "$TMPDIR" 2>/dev/null; exit 1
-}
-
-DIRECT_URL=$(echo "$PAGE" | grep -oP 'href="\Khttps://download[0-9]+\.mediafire\.com[^"]+' | head -1)
-if [ -z "$DIRECT_URL" ]; then
-    DIRECT_URL=$(echo "$PAGE" | grep -oP 'downloadButton\.href\s*=\s*"\K[^"]+')
-fi
-if [ -z "$DIRECT_URL" ]; then
-    echo "❌ No se pudo encontrar el enlace de descarga en la página"
-    rm -rf "$TMPDIR"; exit 1
+if [ "$DIRECT_MODE" = true ]; then
+    echo "🔗 Usando enlace directo..."
+    DIRECT_URL="$URL"
+else
+    echo "🔗 Obteniendo enlace de descarga..."
+    PAGE=$(curl -s -L --max-time 15 \
+        -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" \
+        "$URL" 2>/dev/null) || {
+        echo "❌ Error al conectar (timeout 15s)"
+        rmdir "$TMPDIR" 2>/dev/null; exit 1
+    }
+    DIRECT_URL=$(echo "$PAGE" | grep -oP 'href="\Khttps://download[0-9]+\.mediafire\.com[^"]+' | head -1)
+    if [ -z "$DIRECT_URL" ]; then
+        DIRECT_URL=$(echo "$PAGE" | grep -oP 'downloadButton\.href\s*=\s*"\K[^"]+')
+    fi
+    if [ -z "$DIRECT_URL" ]; then
+        echo "❌ No se encontró enlace en la página."
+        echo "   → Usa --direct <enlace_directo> con el link que IDM extrajo"
+        rm -rf "$TMPDIR"; exit 1
+    fi
 fi
 
 FILENAME=$(basename "$DIRECT_URL" | sed 's/?.*//')
