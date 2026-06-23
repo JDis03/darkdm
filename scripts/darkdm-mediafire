@@ -1,0 +1,103 @@
+#!/bin/bash
+# darkdm-mediafire — Download from MediaFire and auto-extract to Jellyfin media dir
+# Usage: darkdm-mediafire <url> [output-dir]
+
+set -e
+
+URL="${1}"
+OUTDIR="${2:-$HOME/Descargas/MediaFire}"
+
+if [ -z "$URL" ]; then
+    echo "Usage: darkdm-mediafire <url> [output-dir]"
+    echo "Descarga de MediaFire y extracción automática"
+    echo ""
+    echo "Ejemplos:"
+    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar'"
+    echo "  darkdm-mediafire 'https://www.mediafire.com/file/XXXX/file.rar' /ruta/jellyfin/media/peliculas"
+    exit 1
+fi
+
+mkdir -p "$OUTDIR"
+
+echo "🔗 Obteniendo enlace de descarga..."
+PAGE=$(curl -s -L -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" "$URL")
+
+# Extract direct download URL
+DIRECT_URL=$(echo "$PAGE" | grep -oP 'href="\Khttps://download[0-9]+\.mediafire\.com[^"]+' | head -1)
+if [ -z "$DIRECT_URL" ]; then
+    # fallback: buscar downloadButton
+    DIRECT_URL=$(echo "$PAGE" | grep -oP 'downloadButton\.href\s*=\s*"\K[^"]+')
+fi
+
+if [ -z "$DIRECT_URL" ]; then
+    echo "❌ No se pudo encontrar el enlace de descarga"
+    exit 1
+fi
+
+FILENAME=$(basename "$DIRECT_URL" | sed 's/?.*//')
+BASENAME="${FILENAME%.*}"
+
+echo "📄 Archivo: $FILENAME"
+echo "⬇️  Descargando a $OUTDIR/..."
+echo ""
+
+curl -L -o "$OUTDIR/$FILENAME" \
+     -C - \
+     -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36" \
+     --progress-bar \
+     "$DIRECT_URL"
+
+echo ""
+echo "✅ Descarga completa: $OUTDIR/$FILENAME ($(stat -c%s "$OUTDIR/$FILENAME" 2>/dev/null | numfmt --to=iec || echo "?"))"
+
+# Auto-extract based on extension
+case "${FILENAME,,}" in
+    *.rar)
+        echo "📦 Extrayendo RAR..."
+        unrar x -y "$OUTDIR/$FILENAME" "$OUTDIR/" 2>/dev/null || {
+            # Try with password prompt skip
+            unrar x -y -p- "$OUTDIR/$FILENAME" "$OUTDIR/" 2>/dev/null
+        }
+        if [ $? -eq 0 ]; then
+            rm -f "$OUTDIR/$FILENAME"
+            echo "✅ Extraído y archivo original eliminado"
+        else
+            echo "⚠️  Error extrayendo, el .rar queda en $OUTDIR/"
+        fi
+        ;;
+    *.zip)
+        echo "📦 Extrayendo ZIP..."
+        unzip -o "$OUTDIR/$FILENAME" -d "$OUTDIR/"
+        if [ $? -eq 0 ]; then
+            rm -f "$OUTDIR/$FILENAME"
+            echo "✅ Extraído y archivo original eliminado"
+        fi
+        ;;
+    *.7z)
+        echo "📦 Extrayendo 7z..."
+        7z x -y "$OUTDIR/$FILENAME" -o"$OUTDIR/"
+        if [ $? -eq 0 ]; then
+            rm -f "$OUTDIR/$FILENAME"
+            echo "✅ Extraído y archivo original eliminado"
+        fi
+        ;;
+    *.tar.gz|*.tgz)
+        echo "📦 Extrayendo tar.gz..."
+        tar xzf "$OUTDIR/$FILENAME" -C "$OUTDIR/"
+        rm -f "$OUTDIR/$FILENAME"
+        echo "✅ Extraído"
+        ;;
+    *.tar.xz)
+        echo "📦 Extrayendo tar.xz..."
+        tar xJf "$OUTDIR/$FILENAME" -C "$OUTDIR/"
+        rm -f "$OUTDIR/$FILENAME"
+        echo "✅ Extraído"
+        ;;
+    *)
+        echo "📁 Extensión no reconocida ($FILENAME), no se extrajo automáticamente"
+        ;;
+esac
+
+echo ""
+echo "🎬 Contenido final en $OUTDIR/:"
+ls -lah "$OUTDIR/" | tail -10
