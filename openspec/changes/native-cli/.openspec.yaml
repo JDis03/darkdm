@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-06-24
+status: draft
+requires: http-server-native-host

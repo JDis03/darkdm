@@ -2,32 +2,32 @@
   "features": [
     {
       "id": "feat-001",
-      "name": "Project Setup",
-      "description": "Confirm the project can install dependencies, run verification, and start from a clean checkout",
+      "name": "darkdm-mediafire bash (working)",
+      "description": "Script bash funcional para descargar desde MediaFire con --get-link, --password, fix gzip, timeout 1h, y preservación del RAR original",
       "dependencies": [],
-      "status": "not-started",
-      "evidence": ""
+      "status": "completed",
+      "evidence": "--get-link probado con URL real: https://download1350.mediafire.com/.../OOOOOOOOOOO.rar, init.sh build pasa"
     },
     {
       "id": "feat-002",
-      "name": "First User-Facing Feature",
-      "description": "Replace this placeholder with the first concrete behavior the agent should implement",
+      "name": "Native Rust CLI Spec (openspec)",
+      "description": "Spec detallado para el CLI Rust nativo 'darkdm' que reemplace los scripts bash con engine compartido con Tauri. Incluye descarga directa, MediaFire scraper, HLS, extractor, resume, multi-hilo.",
       "dependencies": ["feat-001"],
-      "status": "not-started",
-      "evidence": ""
+      "status": "in-progress",
+      "evidence": "openspec/changes/native-cli/ creado con design.md, tasks.md, proposal.md, .openspec.yaml"
     },
     {
       "id": "feat-003",
-      "name": "Verification Coverage",
-      "description": "Add or confirm tests, type checks, linting, or manual verification for the active feature",
+      "name": "Native Rust CLI Implementation",
+      "description": "Implementar el engine Rust: reqwest download, MediaFire scraper con scraper crate, extracción de archives (ZIP/RAR/tar), barra de progreso indicatif, resume, y binario darkdm con clap",
       "dependencies": ["feat-002"],
       "status": "not-started",
       "evidence": ""
     },
     {
       "id": "feat-004",
-      "name": "Documentation Update",
-      "description": "Update README, architecture notes, or product docs affected by the implemented feature",
+      "name": "Tauri Integration",
+      "description": "Engine compartido entre CLI y Tauri app. Eventos de progreso al frontend, comando Tauri download que usa el mismo engine",
       "dependencies": ["feat-003"],
       "status": "not-started",
       "evidence": ""
