@@ -191,6 +191,346 @@ Muestra información del archivo sin descargar:
 | `--get-link` | Solo mostrar link directo | false |
 | `--quiet` | Sin output a terminal | false |
 | `--json` | Output en JSON | false |
+| `--interactive` | Elegir manualmente entre múltiples links | false |
+| `--show-all` | Mostrar todos los links encontrados (sin filtrar) | false |
+| `--min-size <n>` | Tamaño mínimo del archivo (ej: 10MB, 1GB) | 1MB |
+| `--max-size <n>` | Tamaño máximo del archivo | — |
+| `--ext <exts>` | Extensiones permitidas (ej: mp4,mkv,avi) | — |
+| `--quality <res>` | Calidad preferida (ej: 1080p, 720p, best) | best |
+| `--audio-only` | Solo audio | false |
+| `--video-only` | Solo video del archive | false |
+
+---
+
+## Pros / Cons del enfoque
+
+### ✅ Pros (vs bash actual)
+
+| Aspecto | Bash actual | Rust nativo |
+|---------|------------|-------------|
+| **Velocidad** | Lento (curl 1 hilo) | Multi-hilo con Range (3-5x más rápido) |
+| **Resume** | `-C -` frágil | Range headers + verificación |
+| **HTML parsing** | grep/regex frágil | scraper crate (CSS selectors) |
+| **Dependencias** | curl, unrar, 7z, ffmpeg | Solo runtime de Rust (estático) |
+| **Progreso** | Barra de curl, no capturable | Callbacks → terminal + Tauri |
+| **Errores** | Códigos de salida genéricos | Tipos de error específicos |
+| **Multi-hilo** | No | Sí, segmentación con Range |
+| **Extensible** | Scripts separados | Plugin trait + registro |
+| **Testing** | Casi imposible | Tests unitarios + integración |
+| **Mantenimiento** | Parches sobre parches | Código estructurado |
+
+### ❌ Contras (Rust nativo vs bash)
+
+| Aspecto | Impacto |
+|---------|---------|
+| **Compilación** | `cargo build` tarda ~2-3 min (vs bash instantáneo) |
+| **Tamaño binario** | ~10-15 MB (vs bash ~5 KB) |
+| **Curva de aprendizaje** | Rust es complejo (vs bash que cualquiera modifica) |
+| **Prototipado** | Bash es más rápido para probar ideas |
+| **Dependencias crates** | Necesitas internet para `cargo build` |
+| **RAR nativo** | No hay buen crate Rust para RAR → sigue dependiendo de `unrar` CLI |
+| **yt-dlp** | Sigue siendo dependencia externa para YouTube |
+
+### ⚖️ Balance
+
+| Situación | Recomendación |
+|-----------|---------------|
+| Quieres hacer cambios rápidos | Bash |
+| Quieres velocidad y confiabilidad | Rust |
+| Archivos pequeños (< 100MB) | Bash o Rust, da igual |
+| Archivos grandes (1GB+) | Rust (multi-hilo cambia todo) |
+| Producción/estable | Rust |
+| Scripting personal | Da igual, el CLI funciona igual |
+
+---
+
+## Casos de uso completos
+
+### 1. URL directa de un archivo
+
+```bash
+darkdm descargar "https://cdn.ejemplo.com/video.mp4"
+```
+| Paso | Qué pasa |
+|------|----------|
+| 1 | HEAD request → `Content-Type: video/mp4`, `Content-Length: 1.2GB` |
+| 2 | Verifica `Accept-Ranges: bytes` → sí, multi-hilo posible |
+| 3 | Divide en 4 partes (300MB c/u) |
+| 4 | Descarga en paralelo con Range headers |
+| 5 | Ensambla en `~/Descargas/DarkDM/video.mp4` |
+| ✅ | **3-5x más rápido que curl single-thread** |
+
+### 2. URL con resume
+
+```bash
+# Se cortó a los 500MB...
+darkdm descargar "https://cdn.ejemplo.com/video.mp4"
+# Vuelve a ejecutar
+darkdm descargar "https://cdn.ejemplo.com/video.mp4"
+```
+| Paso | Qué pasa |
+|------|----------|
+| 1 | Detecta `video.mp4` parcial (500MB) en destino |
+| 2 | HEAD request → Content-Length: 1.2GB |
+| 3 | Calcula faltante: 700MB |
+| 4 | Range: `bytes=500000000-` |
+| 5 | Descarga solo lo que falta + verifica integridad |
+| ✅ | **No descarga lo que ya tiene** |
+
+### 3. MediaFire con contraseña
+
+```bash
+darkdm descargar "https://www.mediafire.com/file/XXXX/archivo.rar/file" --password "mipass"
+```
+| Paso | Qué pasa |
+|------|----------|
+| 1 | Detecta `mediafire.com` → plugin MediaFire |
+| 2 | Fetch página HTML con `reqwest` |
+| 3 | CSS selector `#downloadButton` → href |
+| 4 | Extrae link directo: `https://download1350.mediafire.com/.../archivo.rar` |
+| 5 | Descarga link directo (multi-hilo si servidor lo permite) |
+| 6 | Detecta `.rar` → `unrar x -p"mipass"` |
+| 7 | Busca videos → los mueve al destino |
+| ✅ | **Todo automático** |
+
+### 4. YouTube (vía yt-dlp)
+
+```bash
+darkdm descargar "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+```
+| Paso | Qué pasa |
+|------|----------|
+| 1 | Detecta `youtube.com` → plugin YouTube |
+| 2 | `yt-dlp --dump-json` → obtiene info del video |
+| 3 | Muestra: título, duración, formatos disponibles |
+| 4 | `yt-dlp -f bestvideo+bestaudio --merge-output-format mp4` |
+| 5 | yt-dlp descarga y mergea video+audio |
+| ✅ | **1000+ sitios soportados** |
+
+### 5. Página genérica con video
+
+```bash
+darkdm descargar "https://ejemplo.com/pelicula"
+```
+| Paso | Qué pasa |
+|------|----------|
+| 1 | HEAD → `Content-Type: text/html` |
+| 2 | Fetch HTML completo |
+| 3 | page_analyzer busca: `<video>`, `<source>`, anchors `.mp4`, scripts |
+| 4 | Filtra: ads, archivos < 1MB, duplicados |
+| 5 | Encuentra 3 videos: 1080p, 720p, 480p |
+| 6 | Selecciona el mejor (1080p) automáticamente |
+| 7 | Descarga link directo |
+| ✅ | **Sin configuración específica por sitio** |
+
+### 6. Múltiples URLs (cola)
+
+```bash
+darkdm descargar \
+  "https://mediafire.com/file/XXXX/aaa.rar/file" \
+  "https://mediafire.com/file/XXXX/bbb.rar/file" \
+  "https://youtube.com/watch?v=xxxx"
+```
+| Paso | Qué pasa |
+|------|----------|
+| 1 | Encola las 3 URLs |
+| 2 | Descarga una por una |
+| 3 | Muestra progreso total: "2/3 completadas" |
+| ✅ | **Descarga por lotes** |
+
+### 7. Solo info (sin descargar)
+
+```bash
+darkdm info "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+```
+```
+📹 Rick Astley - Never Gonna Give You Up
+   Canal: Rick Astley
+   Duración: 3:32
+   Publicado: 2009-10-25
+   Vistas: 1.5B
+
+Formatos:
+  18   360p  mp4    video+audio  22 MB
+  22   720p  mp4    video+audio  45 MB
+  137  1080p mp4    video only   38 MB
+  140         m4a    audio only   3 MB
+```
+
+```bash
+darkdm info "https://mediafire.com/file/XXXX/archivo.rar/file"
+```
+```
+📦 archivo.rar (2.7 GB)
+   Link directo: https://download1350.mediafire.com/...
+   Contraseña: no detectada
+   Contenido probable: video (por tamaño)
+```
+
+### 8. Búsqueda en YouTube
+
+```bash
+darkdm descargar "ytsearch:never gonna give you up"
+```
+```
+🔍 Buscando: "never gonna give you up"
+   Resultado #1: Rick Astley - Never Gonna Give You Up (3:32)
+   Descargando...
+```
+
+### 9. Pipe a otro programa (--json)
+
+```bash
+darkdm descargar "https://..." --json | jq '.files[].path'
+# "/home/dark/Descargas/DarkDM/video.mp4"
+
+darkdm descargar "https://..." --json | notify-send "Descarga completa"
+```
+
+### 10. Interactivo (elegir entre múltiples opciones)
+
+```bash
+darkdm descargar "https://ejemplo.com" --interactive
+```
+```
+🔍 3 videos encontrados:
+   1) 1080p  video.mp4  2.1 GB
+   2) 720p   video.mp4  1.2 GB
+   3) 480p   video.mp4  700 MB
+   
+Elige (1-3): 2
+⬇️  Descargando 720p...
+```
+
+---
+
+## Manejo de errores de links
+
+### Categorías de error
+
+| Categoría | Ejemplo | Mensaje |
+|-----------|---------|---------|
+| **URL inválida** | `darkdm descargar "no-es-url"` | `❌ URL inválida: "no-es-url". Formato esperado: https://...` |
+| **Sin conexión** | `darkdm descargar "https://ejemplo.com"` (sin internet) | `❌ No se pudo conectar a ejemplo.com. Verifica tu conexión a internet.` |
+| **DNS fail** | `darkdm descargar "https://sitioquenoexiste123.com"` | `❌ No se pudo resolver el dominio: sitioquenoexiste123.com` |
+| **Timeout** | `darkdm descargar "https://server-lento.com/video.mp4"` | `❌ Timeout después de 30s. --timeout para aumentarlo.` |
+| **404** | `darkdm descargar "https://ejemplo.com/noexiste.mp4"` | `❌ 404 Not Found. El archivo ya no existe en el servidor.` |
+| **403** | `darkdm descargar "https://ejemplo.com/video.mp4"` | `❌ 403 Forbidden. Necesitas --referer o --cookie.` |
+| **SSL Error** | `darkdm descargar "https://sitio-con-cert-viejo.com"` | `❌ Error SSL: certificado expirado.` |
+| **Redirect loop** | `darkdm descargar "https://sitio.com/a"` | `❌ Demasiados redirects. El servidor está en un bucle.` |
+| **Sin espacio** | Disco lleno | `❌ No hay espacio en disco. Faltan 500 MB libres.` |
+| **Permiso denegado** | `darkdm descargar "..." --dir /root/` | `❌ No tienes permisos de escritura en /root/. Usa --dir ~/Descargas/` |
+
+### Errores específicos de scraping
+
+| Error | Causa | Solución |
+|-------|-------|----------|
+| `No se encontró link en la página` | La página no tiene videos ni enlaces de descarga | El sitio no es compatible. Usa la extensión de Chrome. |
+| `MediaFire: no se encontró downloadButton` | MediaFire cambió su HTML | Reportar issue. Usar `--get-link` con URL directa. |
+| `YouTube requiere yt-dlp` | yt-dlp no está instalado | `pip install yt-dlp` o `sudo pacman -S yt-dlp` |
+| `Página requiere login` | El contenido está detrás de autenticación | Usa la extensión de Chrome (tiene tus cookies de sesión) |
+| `Video protegido por DRM` | Netflix, Disney+, etc. | No soportado. DRM no se puede descifrar. |
+
+### Errores de extracción
+
+| Error | Causa | Solución |
+|-------|-------|----------|
+| `RAR protegido o corrupto` | Contraseña incorrecta o archivo dañado | Verifica la contraseña con `--password`. Si está dañado, reintenta descarga. |
+| `ZIP corrupto` | Descarga incompleta | Vuelve a ejecutar (resume automático). |
+| `unrar no está instalado` | Falta dependencia | `sudo pacman -S unrar` o `sudo apt install unrar` |
+| `Formato de archive no soportado` | .ace, .arj, etc. | Instala `unar` (The Unarchiver) que soporta más formatos. |
+
+### Códigos de salida
+
+| Código | Significado |
+|--------|-------------|
+| `0` | ✅ Descarga completada exitosamente |
+| `1` | ❌ Error general (URL inválida, sin conexión, etc.) |
+| `2` | ❌ Error de red (timeout, 404, 403, etc.) |
+| `3` | ❌ Error de scraping (no se encontró link) |
+| `4` | ❌ Error de extracción (RAR corrupto, contraseña incorrecta) |
+| `5` | ❌ Error de disco (sin espacio, permisos) |
+| `6` | ❌ Dependencia faltante (yt-dlp, unrar no instalado) |
+| `130` | 🛑 Cancelado por el usuario (Ctrl+C) |
+
+### Ejemplos de output de error
+
+```bash
+# Error de conexión
+$ darkdm descargar "https://sitioquenoexiste123.com/video.mp4"
+❌ No se pudo resolver el dominio: sitioquenoexiste123.com
+   → Verifica que la URL sea correcta
+   → Verifica tu conexión a internet
+   → Si el sitio existe, prueba con --timeout 60
+   Salida: 1
+
+# Error 404
+$ darkdm descargar "https://mediafire.com/file/XXXX/viejo.rar/file"
+❌ 404 Not Found (MediaFire)
+   → El archivo fue eliminado o la URL es incorrecta
+   → Verifica que el archivo sigue disponible en mediafire.com
+   Salida: 2
+
+# Error de scraping
+$ darkdm descargar "https://ejemplo.com"
+❌ No se encontró ningún link de descarga en la página
+   → El analizador revisó: <video>, <source>, anchors, scripts
+   → Sugerencias:
+     1. Usa la extensión de Chrome (captura cualquier stream)
+     2. Si es MediaFire/YouTube, el plugin debería detectarlo
+     3. Pasa la URL directa si la tienes
+   Salida: 3
+
+# Error de contraseña
+$ darkdm descargar "https://mediafire.com/file/XXXX/archivo.rar/file" --password "wrong"
+❌ Contraseña incorrecta para archivo.rar
+   → --password "contraseña_correcta"
+   → Si no sabes la contraseña, el .rar se guardó sin extraer
+   Salida: 4
+
+# Dependencia faltante
+$ darkdm descargar "https://youtube.com/watch?v=xxxx"
+⚠️  YouTube requiere yt-dlp
+   → Instálalo: pip install yt-dlp
+   → O: sudo pacman -S yt-dlp
+   → Luego reintenta
+   Salida: 6
+
+# Cancelado por usuario
+$ darkdm descargar "https://cdn.ejemplo.com/video-grande.mp4"
+⬇️  Descargando... (Ctrl+C presionado)
+🛑 Descarga cancelada
+   → El archivo parcial queda en ~/Descargas/DarkDM/video-grande.mp4.partial
+   → Reintenta y se reanudará automáticamente
+   Salida: 130
+```
+
+### Manejo de errores en JSON
+
+```json
+{
+  "status": "error",
+  "code": 2,
+  "error": "404 Not Found",
+  "url": "https://ejemplo.com/noexiste.mp4",
+  "suggestion": "El archivo fue eliminado o la URL es incorrecta",
+  "partial_path": null,
+  "timestamp": "2026-06-24T10:30:00Z"
+}
+```
+
+```json
+{
+  "status": "cancelled",
+  "code": 130,
+  "error": "Cancelado por usuario",
+  "partial_path": "/home/dark/Descargas/DarkDM/video.mp4.partial",
+  "partial_bytes": 524288000,
+  "total_bytes": 1073741824,
+  "progress_percent": 48.8,
+  "timestamp": "2026-06-24T10:30:00Z"
+}
+```
 
 ## Download Engine
 
