@@ -2,199 +2,197 @@
 
 ## Context
 
-### Referencia: IDM (Internet Download Manager)
+### Cómo funciona IDM realmente
 
-IDM es el estándar de facto en Windows. Su modelo es:
+IDM no tiene scrapers por sitio. Su modelo real es:
 
-1. El usuario copia un link o hace clic en "Descargar con IDM"
-2. IDM intercepta el link y abre su UI
-3. IDM analiza la página/sitio para obtener el link directo
-4. Descarga con **multi-hilo** (hasta 32 conexiones), **resume** automático
-5. Puede programar descargas, capturar videos (HLS/DASH), etc.
+```
+1. Browser extension monitorea TODAS las peticiones HTTP
+2. Cuando detecta una descarga (por content-type, extensión, o tamaño):
+   → Captura: URL + Method + Headers (User-Agent, Referer, Cookie, etc.)
+   → Lo envía a IDM engine
+3. IDM engine descarga con:
+   → Multi-hilo (particiona el archivo)
+   → Resume automático
+   → Programación
+4. El engine NO parsea HTML — la extensión ya le dio la URL directa
+```
 
-### DarkDM hoy
+Los scrapers site-specific de IDM (para MediaFire, etc.) son solo un extra menor — NO son el core.
 
-DarkDM tiene **3 componentes separados** con el mismo propósito:
+### El core de DarkDM debe ser igual
+
+La **extensión de Chrome** es la que captura las URLs. El CLI/engine solo necesita:
+
+1. **Descargar una URL directa** (con headers personalizados)
+2. **Hacerlo bien**: multi-hilo, resume, progreso, timeouts
+3. **Aceptar URLs desde cualquier fuente**: extensión, CLI manual, Tauri GUI
+
+Los extractors site-specific (MediaFire, etc.) son **plugins opcionales** para cuando pegas una URL de página web — no al revés.
+
+### Qué tenemos hoy
 
 | Componente | Rol | Problema |
 |---|---|---|
-| `scripts/darkdm-mediafire` (bash) | Descarga desde MediaFire | Bash frágil, sin progreso nativo, depende de curl |
-| `native-host/src/bin/cli.rs` (Rust) | Descarga HLS (.m3u8) | Solo HLS, llama a ffmpeg/curl, no integrado con Tauri |
-| `native-host/src/downloader.rs` (Rust) | Engine HLS/DASH | No se usa desde CLI, solo desde el HTTP server |
+| `scripts/darkdm-mediafire` (bash) | Script específico para MediaFire | Bash frágil, sinute, engine no compartido |
+| `native-host/src/bin/cli.rs` (Rust) | Descarga HLS (.m3u8) | Solo HLS, llama a ffmpeg/curl |
+| `native-host/src/server.rs` (Rust) | HTTP server para extensión Chrome | Usa curl, no tiene progreso real |
+| `native-host/src/downloader.rs` (Rust) | Engine HLS/DASH con fetch_url | Usa curl, no reqwest |
 
-**No hay un CLI unificado** que haga todo. El usuario tiene que saber qué script usar según el tipo de contenido.
-
-### Problemas del bash actual (`darkdm-mediafire`)
-
-1. **curl sin --compressed** → página MediaFire gzip no se parseaba (ya fixeado)
-2. **grep frágil** → el HTML de MediaFire cambia, regex se rompe
-3. **Sin resume real** → curl -C - funciona a veces, pero no maneja errores bien
-4. **Timeout hardcodeado** → 3min, 10min, ahora 1h... parche sobre parche
-5. **Sin streaming de progreso** → la barra de curl no se puede capturar desde Tauri
-6. **Dependencia de unrar** → hay que tenerlo instalado, versión específica
-7. **Sin cola de descargas** → no se pueden encolar varias URLs
-8. **Sin notificaciones** → cuando termina, no avisa
-
-### ¿Por qué Rust nativo?
-
-- **Tauri ya es Rust** → el CLI comparte el mismo engine que la app desktop
-- **reqwest** → HTTP con streaming, resume, timeout granulado, redirects automáticos
-- **scraper** → parseo de HTML robusto (CSS selectors, no regex)
-- **indicatif** → barra de progreso nativa en terminal
-- **clap** → CLI con autocomplete, flags, subcomandos
-- **Compilado estáticamente** → sin dependencias externas (curl, unrar, etc.)
-- **IPC con Tauri** → el mismo binario puede reportar progreso a la GUI
+**Ninguno descarga genéricamente bien** — todos tienen limitaciones.
 
 ## Goals / Non-Goals
 
 ### Goals
 
-- **CLI unificado** `darkdm descargar <url>` que funcione para cualquier tipo de contenido
-- **MediaFire** → extraer link + descargar + extraer RAR/ZIP/7z (reemplazar `darkdm-mediafire`)
-- **HLS** → descargar streams .m3u8 (reemplazar `darkdm-cli`)
-- **Direct** → descarga directa de cualquier archivo (mp4, pdf, etc.)
-- **Resume** automático si se interrumpe la descarga
-- **--get-link** flag para solo extraer el link directo
-- **--password** para archives protegidos
-- **Multi-hilo** (opcional, configurable)
-- **Barra de progreso** en terminal
-- **Que funcione como CLI independiente y como backend de la app Tauri**
+1. **Engine de descarga universal** (Rust nativo) que:
+   - Descarga cualquier URL directa (video, audio, binario, documento)
+   - Multi-hilo (particionado de archivos)
+   - Resume automático con Range headers
+   - Headers personalizados (User-Agent, Referer, Cookie)
+   - Timeout granular (por conexión + total)
+   - Callbacks de progreso (para terminal y GUI)
+   - Extracción automática de archives (ZIP/RAR/7z/tar)
+
+2. **CLI unificado** `darkdm <url>` que:
+   - Usa el engine directamente
+   - Detecta automáticamente el tipo de contenido
+   - Acepta headers custom (`--referer`, `--user-agent`, `--cookie`)
+   - Barra de progreso en terminal
+   - Output JSON para integraciones
+
+3. **Site-extractors como plugins** (no como core):
+   - Si la URL devuelve HTML (no un archivo), el CLI intenta extraer el link real
+   - Estrategias de extracción genéricas:
+     - Buscar `<video>` / `<audio>` / `<source>` en la página
+     - Buscar enlaces con extensiones de archivo comunes
+     - Detectar scripts con configuraciones de video (window.__NUXT__, etc.)
+   - Extractores específicos (MediaFire, Mega, Google Drive) son plugins opcionales
+
+4. **Integración con extensión Chrome**:
+   - La extensión captura la URL + headers → engine descarga
+   - Sin scraping — la extensión ya hizo el trabajo
+
+5. **Engine compartido** entre CLI, Tauri app, y HTTP server
 
 ### Non-Goals
 
-- GUI (eso lo maneja Tauri/Svelte)
-- Captura de tráfico de red (SSLKEYLOGFILE, tcpdump)
+- GUI (lo maneja Svelte/Tauri)
+- Captura de tráfico de red (SSLKEYLOGFILE)
 - DRM (Netflix, Disney+, etc.)
-- Soporte Windows/macOS por ahora (solo Linux)
-- Parseo de torrent/magnet links
+- Torrents / magnet links
+- Soporte Windows/macOS (por ahora)
 
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────┐
-                    │         darkdm CLI (Rust)        │
-                    │                                  │
-                    │  $ darkdm descargar <url>        │
-                    │  $ darkdm --get-link <url>       │
-                    │  $ darkdm --password "x" <url>   │
-                    └──────────┬──────────────────────┘
+                    ┌─────────────────────────────────────────┐
+                    │         darkdm CLI / Tauri App          │
+                    │                                         │
+                    │  $ darkdm "https://ejemplo.com/video"   │
+                    │  $ darkdm "https://mediafire.com/..."   │
+                    └──────────┬──────────────────────────────┘
                                │
-                    ┌──────────▼──────────────────────┐
-                    │     Download Engine (Rust)       │
-                    │                                  │
-                    │  ┌────────────────────────┐      │
-                    │  │  Link Extractor         │      │
-                    │  │  • MediaFire scraper    │      │
-                    │  │  • HLS parser (.m3u8)   │      │
-                    │  │  • Direct URL (passthru)│      │
-                    │  └────────┬───────────────┘      │
-                    │           │                       │
-                    │  ┌────────▼───────────────┐      │
-                    │  │  HTTP Downloader        │      │
-                    │  │  • reqwest streaming    │      │
-                    │  │  • Resume automático    │      │
-                    │  │  • Multi-hilo (aria2)   │      │
-                    │  │  • Progress callback    │      │
-                    │  └────────┬───────────────┘      │
-                    │           │                       │
-                    │  ┌────────▼───────────────┐      │
-                    │  │  Extractor              │      │
-                    │  │  • RAR (unrar crate)    │      │
-                    │  │  • ZIP (zip crate)      │      │
-                    │  │  • 7z (externo o crate) │      │
-                    │  │  • Video detection      │      │
-                    │  └────────────────────────┘      │
-                    └──────────────────────────────────┘
-                               │
-          ┌────────────────────┼────────────────────┐
-          │                    │                     │
-          ▼                    ▼                     ▼
-   ┌────────────┐    ┌──────────────┐    ┌────────────────┐
-   │ Terminal   │    │ Tauri App    │    │ Systemd        │
-   │ (indicatif)│    │ (Svelte GUI) │    │ (daemon mode)  │
-   └────────────┘    └──────────────┘    └────────────────┘
+                    ┌──────────▼──────────────────────────────┐
+                    │        Download Orchestrator             │
+                    │                                         │
+                    │  1. ¿Ya es URL directa?                  │
+                    │     → saltar a paso 3                    │
+                    │                                         │
+                    │  2. ¿Es página web? Intentar extraer:    │
+                    │     ┌─────────────────────────────┐      │
+                    │     │ Page Analyzer (genérico)     │      │
+                    │     │ • Busca <video>/<audio> src  │      │
+                    │     │ • Busca .mp4/.mkv/.avi href  │      │
+                    │     │ • Busca .m3u8/.mpd manifest  │      │
+                    │     │ • Busca window.__data__ etc  │      │
+                    │     └─────────────────────────────┘      │
+                    │     │                                    │
+                    │     ┌─────────────────────────────┐      │
+                    │     │ Site Plugins (opcional)      │      │
+                    │     │ • MediaFire: download link   │      │
+                    │     │ • Mega: api key + decrypt    │      │
+                    │     │ • Google Drive: confirm dl   │      │
+                    │     └─────────────────────────────┘      │
+                    │                                         │
+                    │  3. Descargar URL directa:               │
+                    │     ┌─────────────────────────────┐      │
+                    │     │ Download Engine              │      │
+                    │     │ • reqwest streaming          │      │
+                    │     │ • Multi-hilo (particionado)  │      │
+                    │     │ • Resume (Range headers)     │      │
+                    │     │ • Headers custom             │      │
+                    │     └─────────────────────────────┘      │
+                    │                                         │
+                    │  4. ¿Es archive? Extraer:               │
+                    │     ┌─────────────────────────────┐      │
+                    │     │ Extractor                    │      │
+                    │     │ • ZIP (zip crate)            │      │
+                    │     │ • RAR (unrar CLI)            │      │
+                    │     │ • 7z (7z CLI)                │      │
+                    │     │ • tar.gz/xz (tar crate)      │      │
+                    │     └─────────────────────────────┘      │
+                    └──────────────────────────────────────────┘
 ```
 
-## CLI Commands
+## Comportamiento del CLI
 
-### `darkdm descargar <url> [destino]` (default)
-
-Descarga el contenido de la URL. Detecta automáticamente el tipo.
+### `darkdm descargar <url> [destino]`
 
 ```bash
-# MediaFire → extrae link, descarga, extrae RAR
-darkdm descargar "https://www.mediafire.com/file/XXXX/archivo.rar/file"
-darkdm descargar "https://www.mediafire.com/file/XXXX/archivo.rar/file" ~/Pelis
+# ─── Modo IDM: URL directa ───
+darkdm descargar "https://cdn.ejemplo.com/video.mp4"
+darkdm descargar "https://cdn.ejemplo.com/video.mp4" ~/Videos
+darkdm descargar "https://cdn.ejemplo.com/video.mp4" --referer "https://sitio.com" --user-agent "Mozilla/5.0"
+darkdm descargar "https://cdn.ejemplo.com/video.mp4" --cookie "session=abc123"
+darkdm descargar "https://cdn.ejemplo.com/video.mp4" --threads 8
 
-# Con contraseña
-darkdm descargar "https://www.mediafire.com/file/XXXX/archivo.rar/file" --password "mipass"
+# ─── Modo página web (extracción automática) ───
+darkdm descargar "https://mediafire.com/file/XXXX/archivo.rar/file"
+darkdm descargar "https://mediafire.com/file/XXXX/archivo.rar/file" --password "mipass"
 
-# Solo extraer link directo (sin descargar)
-darkdm descargar "https://www.mediafire.com/file/XXXX/archivo.rar/file" --get-link
-# Output: https://download1350.mediafire.com/.../archivo.rar
+# ─── HLS / DASH ───
+darkdm descargar "https://cdn.ejemplo.com/stream.m3u8"
+darkdm descargar "https://cdn.ejemplo.com/manifest.mpd"
 
-# HLS stream
-darkdm descargar "https://cdn.example.com/stream.m3u8" video.mp4
+# ─── Solo info ───
+darkdm info "https://cdn.ejemplo.com/video.mp4"
+# → Nombre: video.mp4 | Tamaño: 1.2 GB | Tipo: video/mp4 | Resumen: yes
 
-# Download directo
-darkdm descargar "https://example.com/video.mp4" ~/Descargas/
+# ─── Output para scripting ───
+darkdm descargar "https://..." --json
 ```
 
 ### `darkdm info <url>`
 
-Muestra información del archivo sin descargar.
+Muestra información del archivo sin descargar:
+- Nombre del archivo
+- Tamaño
+- Content-Type
+- ¿Soporta Range? (para resume)
+- Si es página web: qué enlaces detecta
 
-```bash
-darkdm info "https://www.mediafire.com/file/XXXX/archivo.rar/file"
-# Output:
-#   Nombre: archivo.rar
-#   Tamaño: 2.7 GB
-#   Link directo: https://download1350.mediafire.com/...
-```
-
-### `darkdm lista`
-
-Muestra el estado de las descargas activas (progreso, ETA, velocidad).
-
-### `darkdm cancelar <id>`
-
-Cancela una descarga en curso.
-
-## Flags globales
+### Flags
 
 | Flag | Descripción | Default |
 |---|---|---|
 | `--dir <path>` | Directorio de descarga | `~/Descargas/DarkDM` |
-| `--password <p>` | Contraseña para archivos protegidos | — |
-| `--get-link` | Solo extrae y muestra el link directo | false |
-| `--keep-archive` | Conserva el .rar/.zip después de extraer | true |
-| `--video-only` | Solo extrae videos, ignora otros archivos | false |
-| `--threads <n>` | Número de hilos de descarga | 4 |
-| `--resume` | Intentar reanudar descarga interrumpida | true |
+| `--password <p>` | Contraseña para archives | — |
+| `--referer <url>` | Header Referer | — |
+| `--user-agent <ua>` | Header User-Agent | Chrome 124 |
+| `--cookie <str>` | Header Cookie | — |
+| `--header <k:v>` | Header custom (multi) | — |
+| `--threads <n>` | Número de hilos | 4 |
+| `--resume` | Reanudar si hay archivo parcial | true |
+| `--keep-archive` | Conservar .rar/.zip tras extraer | true |
+| `--video-only` | Solo extraer videos del archive | false |
 | `--timeout <secs>` | Timeout por conexión | 30 |
 | `--max-time <secs>` | Timeout total | 3600 |
-| `--quiet` | Sin output | false |
-| `--json` | Output en JSON (para integraciones) | false |
+| `--get-link` | Solo mostrar link directo | false |
+| `--quiet` | Sin output a terminal | false |
+| `--json` | Output en JSON | false |
 
-## Source detection (auto-detect)
-
-El CLI debe detectar automáticamente el tipo de contenido:
-
-1. **MediaFire** → URL contiene `mediafire.com/file/`
-   - Scrapea HTML con `scraper` crate (CSS selectors)
-   - Encuentra `#downloadButton` href
-   - Extrae nombre del archivo del título/page
-
-2. **HLS** → URL contiene `.m3u8`
-   - Parses manifest, descarga segmentos, concatena
-   - Si hay master playlist, selecciona mejor calidad
-
-3. **Direct** → cualquier URL con extensión de archivo o content-type
-   - Descarga directa con reqwest streaming
-
-## Comportamiento de descarga
-
-### Download Engine
+## Download Engine
 
 ```rust
 pub struct DownloadOptions {
@@ -202,18 +200,38 @@ pub struct DownloadOptions {
     pub output_dir: PathBuf,
     pub filename: Option<String>,
     pub password: Option<String>,
-    pub keep_archive: bool,
-    pub video_only: bool,
+    pub referer: Option<String>,
+    pub user_agent: Option<String>,
+    pub cookies: Option<String>,
+    pub extra_headers: Vec<(String, String)>,
     pub num_threads: u32,
     pub resume: bool,
-    pub timeout: u64,
+    pub keep_archive: bool,
+    pub video_only: bool,
+    pub connection_timeout: u64,
     pub max_time: u64,
+}
+
+pub struct ProgressInfo {
+    pub bytes_downloaded: u64,
+    pub total_bytes: Option<u64>,  // None si no se sabe
+    pub speed: f64,                 // bytes/sec
+    pub eta: Option<Duration>,
+    pub phase: DownloadPhase,       // Connecting | Downloading | Extracting | Done
+}
+
+pub enum DownloadPhase {
+    Resolving,
+    Connecting,
+    Downloading,
+    Extracting,
+    Done,
 }
 
 pub enum DownloadResult {
     Success {
         output_path: PathBuf,
-        files: Vec<PathBuf>,  // todos los archivos generados
+        files: Vec<PathBuf>,
         total_bytes: u64,
         duration: Duration,
         extracted: bool,
@@ -229,225 +247,272 @@ pub enum DownloadResult {
 }
 ```
 
-### MediaFire scraper
+### Flujo del engine
+
+```
+recibir URL
+  │
+  ├─ ¿Content-Type es application/x-mpegURL o .m3u8?
+  │    → download_hls()
+  │
+  ├─ ¿Content-Type es application/dash+xml o .mpd?
+  │    → download_dash()
+  │
+  ├─ ¿Content-Type empieza con video/ audio/ application/octet?
+  │  ¿O tiene extensión de archivo?
+  │    → download_direct()
+  │
+  ├─ ¿Content-Type es text/html?
+  │    → page_analyzer() busca enlaces
+  │    → si no encuentra → error "no se pudo extraer link"
+  │    → si encuentra → download_direct()
+  │
+  └─ Si no se puede determinar:
+       → download_direct() (intenta igual)
+```
+
+### Page Analyzer (genérico, no específico)
 
 ```rust
-pub struct MediaFireLink {
-    pub direct_url: String,
-    pub filename: String,
-    pub filesize: Option<u64>,
+pub fn analyze_page(html: &str, page_url: &Url) -> Vec<DetectedLink> {
+    // Estrategias de extracción, en orden:
+    
+    // 1. Buscar <video> <source> src
+    // 2. Buscar <a href="*.mp4">, <a href="*.mkv">, etc
+    // 3. Buscar <a href="*.m3u8">, <a href="*.mpd">
+    // 4. Buscar scripts con config: window.__NUXT__, window.__INITIAL_STATE__
+    // 5. Buscar meta[property="og:video"]
+    // 6. Buscar iframe[src] con videos
+    // 7. Intentar site-plugins (MediaFire, etc.)
 }
 
-pub fn extract_mediafire_link(page_url: &str) -> Result<MediaFireLink, String> {
-    // 1. Fetch page HTML con reqwest + User-Agent
-    // 2. Parse con scraper crate
-    // 3. Buscar #downloadButton → href
-    // 4. Fallback: buscar en cualquier href que contenga download*.mediafire.com
-    // 5. Extraer filename desde el nombre del archivo en el título
+pub struct DetectedLink {
+    pub url: String,
+    pub source: LinkSource,  // VideoTag | Anchor | Script | SitePlugin
+    pub filename: Option<String>,
+    pub quality: Option<String>,
 }
 ```
 
-### Resume
-
-Usar `reqwest` con headers `Range` y `Accept-Ranges`:
+### Site Plugins (opcionales, registrables)
 
 ```rust
-// Si el archivo parcial existe y el servidor soporta Range:
-//   1. GET con Range: bytes=X-  (X = bytes descargados)
-//   2. Append al archivo existente
-//   3. Verificar integridad al final
+pub trait SitePlugin {
+    fn name(&self) -> &'static str;
+    fn matches(&self, url: &Url) -> bool;
+    fn extract(&self, page_html: &str, page_url: &Url) -> Result<Vec<DetectedLink>, String>;
+}
+
+// Plugins built-in:
+// - MediaFirePlugin: busca #downloadButton href
+// - MegaPlugin: API key + decrypt
+// - GoogleDrivePlugin: confirma descarga
+// - YoutubePlugin: yt-dlp integration
 ```
 
-### Extracción de archives
+## Multi-hilo (como IDM)
+
+IDM descarga archivos en **particiones** con múltiples conexiones:
+
+```
+Archivo: 100 MB
+Thread 1: bytes 0-25M
+Thread 2: bytes 25M-50M
+Thread 3: bytes 50M-75M
+Thread 4: bytes 75M-100M
+```
+
+El engine debe:
+1. Hacer HEAD request para obtener tamaño total
+2. Verificar que el servidor soporta Range headers
+3. Dividir en N partes iguales
+4. Descargar cada parte en paralelo
+5. Ensamblar al final
 
 ```rust
-pub fn extract_archive(path: &Path, password: Option<&str>) -> Result<Vec<PathBuf>, String> {
-    // Detectar tipo por extensión:
-    // .rar → `unrar` crate o comando externo
-    // .zip → `zip` crate
-    // .7z  → crate externo o 7z CLI
-    // .tar.gz, .tar.xz → `tar` crate
-    // Retorna lista de archivos extraídos
+pub fn download_with_segments(
+    url: &str,
+    total_size: u64,
+    num_threads: u32,
+    output: &Path,
+    progress: impl Fn(ProgressInfo),
+) -> Result<(), String> {
+    let segment_size = total_size / num_threads as u64;
+    
+    // Lanzar N threads, cada uno con su Range
+    for i in 0..num_threads {
+        let start = i as u64 * segment_size;
+        let end = if i == num_threads - 1 { total_size - 1 } else { start + segment_size - 1 };
+        // GET con Range: bytes={start}-{end}
+        // Escribir en archivo temporal
+        // Reportar progreso
+    }
+    
+    // Ensamblar archivos temporales
+}
+```
+
+## Resume automático
+
+```
+1. Verificar si ya existe archivo parcial en output_dir
+2. Comparar tamaño con Content-Length del servidor
+3. Si es menor → GET con Range: bytes={existing_size}-
+4. Append al archivo existente
+```
+
+## Extracción de archives
+
+```rust
+pub fn extract(path: &Path, password: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    match detect_archive_type(path) {
+        ArchiveType::Zip => extract_zip(path),
+        ArchiveType::Rar => extract_rar(path, password),
+        ArchiveType::SevenZ => extract_7z(path, password),
+        ArchiveType::TarGz => extract_targz(path),
+        ArchiveType::TarXz => extract_tarxz(path),
+        ArchiveType::None => Ok(vec![]),  // no es archive
+    }
 }
 ```
 
 ## Integración con Tauri
 
-El CLI debe ser un binario separado pero usar el mismo engine que la app Tauri:
-
 ```
 src-tauri/
   src/
-    lib.rs          ← Tauri app (frontend Svelte)
-    cli.rs          ← punto de entrada para darkdm CLI binario
-    downloader/     
-      mod.rs        ← Download engine compartido
-      mediafire.rs  ← MediaFire scraper
-      hls.rs        ← HLS parser/descargador
-      direct.rs     ← Descarga directa
-      extract.rs    ← Extracción de archives
-      progress.rs   ← Callbacks de progreso
+    lib.rs                    ← Tauri app + engine público
+    bin/cli.rs               ← darkdm CLI
+    downloader/
+      mod.rs                  ← Orchestrator principal
+      engine.rs               ← reqwest download core
+      segmented.rs            ← Multi-hilo con Range
+      resume.rs               ← Resume logic
+      hls.rs                  ← HLS parser/downloader
+      dash.rs                 ← DASH parser/downloader
+      page_analyzer.rs        ← Generic page scraper
+      plugins/
+        mod.rs                ← Plugin trait
+        mediafire.rs          ← MediaFire plugin
+        mega.rs               ← Mega plugin (futuro)
+      extract.rs              ← Archive extraction
+      progress.rs             ← Progress types + callbacks
 ```
-
-### Binarios en Cargo.toml
-
-```toml
-[[bin]]
-name = "darkdm"
-path = "src/bin/cli.rs"       # CLI entry point
-
-[[bin]]
-name = "darkdm-host"          # HTTP server (ya existe)
-path = "src/main.rs"
-
-# El lib.rs sigue siendo la app Tauri
-```
-
-El engine vive en `lib.rs` y lo usan tanto el CLI como la app Tauri:
 
 ```rust
-// lib.rs — engine compartido
+// lib.rs
 pub mod downloader;
 
-// src/bin/cli.rs — CLI
-use darkdm::downloader;
-
-fn main() {
-    let args = clap::parse();
-    downloader::descargar(args);
-}
-
-// src-tauri/src/lib.rs — Tauri app
-use darkdm::downloader;
+use downloader::{descargar, DownloadOptions};
 
 #[tauri::command]
-fn download(url: String, password: Option<String>) {
-    downloader::descargar(DownloadOptions { url, password });
+fn download_url(url: String, dir: Option<String>, password: Option<String>) {
+    let options = DownloadOptions {
+        url,
+        output_dir: dir.map(PathBuf::from).unwrap_or_default(),
+        password,
+        ..Default::default()
+    };
+    
+    // Lanzar en thread separado, reportar progreso via eventos Tauri
+    tauri::async_runtime::spawn(async move {
+        let result = descargar(options).await;
+        // Emitir evento "download-complete"
+    });
 }
 ```
 
-## Implementation Plan
-
-### Fase 1: Engine básico en Rust
-- [ ] Migrar `downloader.rs` actual a `src-tauri/src/downloader/`
-- [ ] Implementar descarga directa con `reqwest`
-- [ ] Implementar MediaFire scraper con `scraper` crate
-- [ ] Implementar extracción de archives (unrar, zip)
-- [ ] Implementar barra de progreso con `indicatif`
-
-### Fase 2: CLI
-- [ ] Crear binario `darkdm` con `clap`
-- [ ] Comando `descargar` completo
-- [ ] Comando `info`
-- [ ] Flag `--get-link`
-- [ ] Flag `--json` para integraciones
-
-### Fase 3: Resume y multi-hilo
-- [ ] Implementar resume con Range requests
-- [ ] Multi-hilo con segmentación de archivos
-- [ ] Timeout granular (por conexión y total)
-
-### Fase 4: Integración Tauri
-- [ ] Eventos de progreso → frontend Svelte
-- [ ] El CLI comparte engine con `lib.rs`
-
-## Dependencies (crates)
+## Dependencies
 
 ```toml
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["stream"] }
-scraper = "0.20"                                 # HTML parsing (MediaFire)
-indicatif = "0.17"                               # Progress bar
+scraper = "0.20"           # HTML parsing (page analyzer)
+indicatif = "0.17"         # Progress bar terminal
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-zip = "2"                                        # ZIP extraction
-tar = "0.4"                                      # tar.gz extraction
-flate2 = "1"                                     # gzip decompression
-xz = "0.2"                                       # xz decompression
-# Nota: RAR requiere crate externo (unrust) o llamar a unrar CLI
+zip = "2"                  # ZIP extraction
+tar = "0.4"                # tar.gz/xz
+flate2 = "1"               # gzip
+xz2 = "0.1"               # xz
+url = "2"                  # URL parsing
+mime_guess = "2"           # Content-Type detection
+chrono = "0.4"             # Timestamps
 ```
 
 ## Decisions
 
-### 1. `reqwest` sobre `curl`
+### 1. Core = download engine, no scrapers
 
-**Decisión**: Usar `reqwest` (Rust nativo) en lugar de llamar a curl.
+**Decisión**: El core del CLI es un **download engine universal** que acepta URLs directas. La extracción de páginas web es una feature secundaria.
 
-**Rationale**:
-- Control total del HTTP (headers, timeouts, redirects, streaming)
-- Resume con Range headers programático
-- Sin dependencia externa (curl no necesita estar instalado)
-- Compartir tipos con la app Tauri (mismo engine)
+**Rationale**: Como IDM, la extensión de Chrome es la que captura las URLs con todos sus headers. El engine solo necesita descargar bien.
 
-### 2. `scraper` para MediaFire (no regex)
+### 2. reqwest nativo, no curl
 
-**Decisión**: Usar el crate `scraper` con CSS selectors para parsear el HTML de MediaFire.
+**Decisión**: Usar `reqwest` para todo el HTTP.
 
-**Rationale**:
-- CSS selectors son más robustos que regex para HTML
-- `#downloadButton` es un selector estable
-- Si MediaFire cambia, es fácil de actualizar
-- El regex actual se rompe si cambia el orden de los atributos
+**Rationale**: Control total (headers, streaming, Range), sin dependencias externas, comparte tipos con Tauri.
 
-### 3. `clap` para el CLI
+### 3. Multi-hilo con Range (como IDM)
 
-**Decisión**: Usar `clap` con derive macros para el parseo de argumentos.
+**Decisión**: Implementar particionado de archivos con Range headers.
 
-**Rationale**:
-- Autocomplete para shells
-- Mensajes de error claros
-- Subcomandos (`descargar`, `info`, `lista`, `cancelar`)
-- Es el estándar en Rust
+**Rationale**: IDM descarga archivos grandes ~3x más rápido con 4-8 hilos. reqwest soporta Range nativamente.
 
-### 4. Binario separado, engine compartido
+### 4. Page Analyzer genérico, plugins site-specific
 
-**Decisión**: El CLI es un binario separado que usa el engine de `lib.rs`.
+**Decisión**: El page analyzer busca enlaces genéricamente (video tags, anchors, scripts). Los site-plugins (MediaFire, Mega) son solo un extra.
 
-**Rationale**:
-- El engine se compila una vez, lo usan CLI y Tauri
-- El CLI no necesita toda la dependencia de Tauri
-- Se puede probar el CLI sin la GUI
-- La GUI puede llamar al mismo engine via IPC
+**Rationale**: No podemos tener scrapers para cada sitio del mundo. Lo genérico cubre el 90%. Los plugins cubren sitios populares.
 
-### 5. RAR: llamar a `unrar` CLI
+### 5. Resumen de sesión de descarga
 
-**Decisión**: Para RAR, llamar al binario `unrar` del sistema (en lugar de crate Rust).
+**Output del CLI**:
+```bash
+$ darkdm descargar "https://mediafire.com/file/XXXX/archivo.rar/file"
 
-**Rationale**:
-- Los crates de RAR en Rust (`unrust`, `unrar-rs`) tienen soporte limitado
-- `unrar` CLI maneja RAR5, cifrado, volúmenes, multi-part
-- `unrar` ya está instalado en el sistema del usuario
-- Alternativa: `unar` (The Unarchiver) que maneja más formatos
+Resolviendo... → MediaFire detectado
+Extrayendo enlace directo...
+  → https://download1350.mediafire.com/.../archivo.rar
 
-### 6. Salida JSON para integración
+Descargando archivo.rar (2.7 GB)
+  ━━━━━━━━━━━━━━━━━━━━━━╸━━━━━━ 78% • 12.3 MB/s • ETA: 1:23
+  Threads: 4/4 activos
 
-**Decisión**: El CLI puede output en JSON con `--json`.
+✅ Descarga completa (2.7 GB en 2:34)
+📦 Extrayendo... (contraseña: sí)
+  → video.mp4 (1.1 GB)
+  → archivo.rar conservado en ~/Descargas/DarkDM/
+```
 
-**Rationale**:
-- Permite que otros programas (scripts, GUIs) consuman el output
-- La app Tauri puede parsear JSON para mostrar resultados
-- Útil para notificaciones del sistema
+### 6. Output JSON para todo
+
+Con `--json`, cualquier comando debe output JSON parseable:
+
+```bash
+darkdm descargar "https://..." --json
+# {"status":"success","files":[{"path":"...","size":123}],"duration":154}
+```
 
 ## Risks / Trade-offs
 
-- **[Riesgo] Tamaño del binario** → reqwest + tokio = ~10MB compilado. Pero es estático, no necesita nada más.
-- **[Riesgo] MediaFire cambia su HTML** → Mitigación: el scraper usa selectores CSS, fáciles de actualizar. Añadir tests de integración que verifiquen el scraper periódicamente.
-- **[Riesgo] RAR5 no soportado por crate** → Mitigación: llamar a `unrar` CLI. Si no está instalado, error claro con instrucciones.
-- **[Trade-off] Sin multi-hilo nativo en v1** → Empezar con single-thread (reqwest), añadir multi-hilo con segmentación después. La mayoría de los archivos de MediaFire son single-file.
-- **[Trade-off] Rust es más lento de compilar que bash** → Pero más rápido en ejecución, menos bugs, mejor mantenimiento.
+- **[Riesgo] Servidores sin Range** → Muchos CDNs no soportan Range (o solo en ciertos casos). Mitigación: detectar Accept-Ranges, fallback a single-thread.
+- **[Riesgo] Rate limiting con multi-hilo** → Algunos servidores limitan conexiones simultáneas. Mitigación: --threads configurable, default conservador (4).
+- **[Riesgo] Content-Length dinámico** → Algunos streams cambian de tamaño. Mitigación: si Content-Length cambia, reiniciar sin Range.
+- **[Trade-off] Rust compile time** → Más lento que bash. Pero se compila una vez y corre sin dependencias.
 
 ## Definition of Done
 
-- [ ] `darkdm descargar <mediafire_url>` funciona sin errores
-- [ ] `darkdm descargar <mediafire_url> --password x` extrae RAR correctamente
-- [ ] `darkdm descargar <mediafire_url> --get-link` solo imprime el link
+- [ ] `darkdm descargar <direct_url>` descarga con progreso
+- [ ] `darkdm descargar <direct_url> --threads 8` multi-hilo
+- [ ] `darkdm descargar <direct_url> --resume` reanuda si se cortó
+- [ ] `darkdm descargar <mediafire_url>` extrae link + descarga
+- [ ] `darkdm descargar <mediafire_url> --password x` extrae RAR
 - [ ] `darkdm descargar <hls_url>` descarga stream HLS
-- [ ] `darkdm descargar <direct_url>` descarga archivo directo
-- [ ] Resume funciona (interrumpir y reanudar)
-- [ ] Barra de progreso visible en terminal
-- [ ] `--json` output es parseable
-- [ ] Engine funciona desde Tauri (comando `download`)
-- [ ] `./init.sh` pasa (build)
-- [ ] Tests unitarios para MediaFire scraper
+- [ ] `darkdm info <url>` muestra info sin descargar
+- [ ] `darkdm descargar <url> --json` output JSON
+- [ ] `./init.sh` pasa
+- [ ] Engine funciona desde Tauri
