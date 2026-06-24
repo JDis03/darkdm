@@ -297,18 +297,348 @@ pub struct DetectedLink {
 ### Site Plugins (opcionales, registrables)
 
 ```rust
-pub trait SitePlugin {
+pub trait SitePlugin: Send + Sync {
     fn name(&self) -> &'static str;
     fn matches(&self, url: &Url) -> bool;
     fn extract(&self, page_html: &str, page_url: &Url) -> Result<Vec<DetectedLink>, String>;
 }
 
-// Plugins built-in:
-// - MediaFirePlugin: busca #downloadButton href
-// - MegaPlugin: API key + decrypt
-// - GoogleDrivePlugin: confirma descarga
-// - YoutubePlugin: yt-dlp integration
+// Plugins built-in (registrados en orden de prioridad):
+// 1. YoutubePlugin → llama a yt-dlp
+// 2. MediaFirePlugin → busca #downloadButton href
+// 3. MegaPlugin → API key + decrypt (futuro)
+// 4. GoogleDrivePlugin → confirma descarga (futuro)
 ```
+
+---
+
+### Plugin YouTube (vía yt-dlp)
+
+YouTube **no se puede scrapear**. No hay `<video src>` en el HTML, no hay manifests públicos sin autenticación, el contenido está cifrado en segmentos. La única forma realista es usar **yt-dlp**, el estándar de facto.
+
+#### Cómo funciona yt-dlp
+
+yt-dlp (fork de youtube-dl) hace todo el trabajo pesado:
+1. Descifra la página de YouTube (JS, cifrado, signature decoding)
+2. Obtiene los manifests DASH/HLS reales
+3. Selecciona el mejor formato (video + audio separados)
+4. Los descarga y los multiplexa en un solo archivo
+
+Ejemplo de comandos yt-dlp:
+
+```bash
+# Obtener lista de formatos disponibles
+yt-dlp -F "https://youtube.com/watch?v=xxxx"
+
+# Obtener URL directa del mejor formato (sin descargar)
+yt-dlp -g --format "bestvideo+bestaudio/best" "https://youtube.com/watch?v=xxxx"
+
+# Descargar y convertir a mp4
+yt-dlp --format "bestvideo+bestaudio/best" --merge-output-format mp4 \
+  -o "~/Descargas/DarkDM/%(title)s.%(ext)s" "https://youtube.com/watch?v=xxxx"
+```
+
+#### Plugin: casos de uso
+
+```bash
+# ─── Descargar video (best quality automático) ───
+darkdm descargar "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+# 1. Plugin detecta youtube.com
+# 2. Llama a yt-dlp con format best
+# 3. yt-dlp descarga video+audio, merge a mp4
+# 4. → ~/Descargas/DarkDM/Rick Astley - Never Gonna Give You Up.mp4
+
+# ─── YouTube + playlist ───
+darkdm descargar "https://youtube.com/playlist?list=PL..."
+# → yt-dlp descarga toda la playlist
+
+# ─── YouTube + formato específico ───
+darkdm descargar "https://youtube.com/watch?v=xxxx" --yt-format "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+
+# ─── YouTube + solo audio ───
+darkdm descargar "https://youtube.com/watch?v=xxxx" --yt-audio-only
+
+# ─── YouTube + subtítulos ───
+darkdm descargar "https://youtube.com/watch?v=xxxx" --yt-subs
+
+# ─── YouTube + info (sin descargar) ───
+darkdm info "https://youtube.com/watch?v=xxxx"
+# → Título: Rick Astley - Never Gonna Give You Up
+# → Duración: 3:32
+# → Formatos: 18 (360p), 22 (720p), 137+140 (1080p DASH)
+# → Mejor: 1080p DASH (video+audio)
+
+# ─── YouTube + búsqueda ───
+darkdm descargar "ytsearch:rick astley never gonna"
+# → yt-dlp busca en YouTube y descarga el primer resultado
+
+# ─── YouTube + lista de URLs ───
+darkdm descargar "https://youtube.com/watch?v=xxxx" "https://youtube.com/watch?v=yyyy"
+# → Cola de descargas
+
+# ─── Otros sitios soportados por yt-dlp ───
+darkdm descargar "https://vimeo.com/123456789"
+darkdm descargar "https://www.tiktok.com/@user/video/123456789"
+darkdm descargar "https://twitter.com/user/status/123456789"
+darkdm descargar "https://www.twitch.tv/clips/..."
+darkdm descargar "https://www.instagram.com/p/..."
+```
+
+#### Flags específicos de YouTube
+
+| Flag | Descripción | Default |
+|---|---|---|
+| `--yt-format <fmt>` | Formato específico de yt-dlp | `bestvideo+bestaudio/best` |
+| `--yt-audio-only` | Solo descargar audio (mp3) | false |
+| `--yt-subs` | Descargar subtítulos | false |
+| `--yt-playlist-start <n>` | Empezar desde el item N de la playlist | 1 |
+| `--yt-playlist-end <n>` | Terminar en el item N de la playlist | — |
+| `--yt-output-template <t>` | Template de nombre de archivo | `%(title)s.%(ext)s` |
+
+#### Plugin: implementación
+
+```rust
+use std::process::Command;
+use std::path::PathBuf;
+
+pub struct YoutubePlugin;
+
+impl SitePlugin for YoutubePlugin {
+    fn name(&self) -> &'static str {
+        "youtube-dlp"
+    }
+
+    fn matches(&self, url: &Url) -> bool {
+        let host = url.host_str().unwrap_or("");
+        // YouTube
+        host.contains("youtube.com") || host == "youtu.be" ||
+        // yt-dlp search
+        url.as_str().starts_with("ytsearch") ||
+        // Otros sitios populares que yt-dlp soporta
+        host.contains("vimeo.com") ||
+        host.contains("twitch.tv") ||
+        host.contains("tiktok.com") ||
+        host.contains("twitter.com") ||
+        host.contains("x.com") ||
+        host.contains("instagram.com") ||
+        host.contains("facebook.com") ||
+        host.contains("dailymotion.com")
+    }
+
+    fn extract(&self, page_html: &str, page_url: &Url) -> Result<Vec<DetectedLink>, String> {
+        // Para yt-dlp no necesitamos el HTML del todo —
+        // yt-dlp obtiene la info por su cuenta
+        Ok(vec![DetectedLink {
+            url: page_url.as_str().to_string(),
+            source: LinkSource::SitePlugin("youtube-dlp"),
+            filename: None,
+            quality: None,
+        }])
+    }
+}
+
+pub struct YoutubeOptions {
+    pub format: Option<String>,         // --yt-format
+    pub audio_only: bool,               // --yt-audio-only
+    pub subs: bool,                     // --yt-subs
+    pub playlist_start: Option<u32>,    // --yt-playlist-start
+    pub playlist_end: Option<u32>,      // --yt-playlist-end
+    pub output_template: Option<String>,// --yt-output-template
+}
+
+impl Default for YoutubeOptions {
+    fn default() -> Self {
+        Self {
+            format: Some("bestvideo+bestaudio/best".into()),
+            audio_only: false,
+            subs: false,
+            playlist_start: None,
+            playlist_end: None,
+            output_template: Some("%(title)s.%(ext)s".into()),
+        }
+    }
+}
+
+/// Descarga con yt-dlp y reporta progreso
+pub fn download_with_ytdlp(
+    url: &str,
+    options: &YoutubeOptions,
+    output_dir: &Path,
+    progress: impl Fn(ProgressInfo),
+) -> Result<DownloadResult, String> {
+    // Verificar que yt-dlp existe
+    let which = Command::new("which")
+        .arg("yt-dlp")
+        .output()
+        .map_err(|_| "yt-dlp no está instalado. Instálalo con:\n  pip install yt-dlp\n  # o\n  sudo pacman -S yt-dlp".to_string())?;
+
+    if !which.status.success() {
+        return Err("yt-dlp no está instalado".to_string());
+    }
+
+    let output_template = options.output_template
+        .clone()
+        .unwrap_or_else(|| "%(title)s.%(ext)s".into());
+    let output_path = output_dir.join(&output_template);
+
+    let mut cmd = Command::new("yt-dlp");
+    cmd.args([
+        "--format", options.format.as_deref().unwrap_or("bestvideo+bestaudio/best"),
+        "--merge-output-format", "mp4",
+        "--output", output_path.to_str().unwrap_or(""),
+        "--progress-template", "console:%(progress.eta)s %(progress.speed)s",
+        "--no-mtime",                        // no modificar timestamp
+        "--embed-thumbnail",                 // thumbnail en el archivo
+        "--embed-metadata",                  // metadatos en el archivo
+    ]);
+
+    if options.audio_only {
+        cmd.args(["--extract-audio", "--audio-format", "mp3"]);
+    }
+
+    if options.subs {
+        cmd.args(["--write-subs", "--sub-langs", "all"]);
+    }
+
+    if let Some(start) = options.playlist_start {
+        cmd.args(["--playlist-start", &start.to_string()]);
+    }
+    if let Some(end) = options.playlist_end {
+        cmd.args(["--playlist-end", &end.to_string()]);
+    }
+
+    // Cookies del navegador (para contenido restringido por edad)
+    cmd.args(["--cookies-from-browser", "vivaldi"]);
+
+    cmd.arg(url);
+
+    // Ejecutar y reportar progreso
+    progress(ProgressInfo {
+        bytes_downloaded: 0,
+        total_bytes: None,
+        speed: 0.0,
+        eta: None,
+        phase: DownloadPhase::Downloading,
+    });
+
+    let status = cmd.status()
+        .map_err(|e| format!("Error ejecutando yt-dlp: {}", e))?;
+
+    if !status.success() {
+        return Err(format!("yt-dlp falló con código: {}", status));
+    }
+
+    // Encontrar el archivo descargado
+    let files = find_files_in_dir(output_dir);
+    let total_size: u64 = files.iter()
+        .filter_map(|f| std::fs::metadata(f).ok().map(|m| m.len()))
+        .sum();
+
+    Ok(DownloadResult {
+        output_path: output_dir.to_path_buf(),
+        files,
+        total_bytes: total_size,
+        duration: Duration::from_secs(0),
+        extracted: false,
+    })
+}
+
+/// Función info para YouTube (sin descargar)
+pub fn get_ytdlp_info(url: &str) -> Result<serde_json::Value, String> {
+    let output = Command::new("yt-dlp")
+        .args(["--dump-json", "--no-download", url])
+        .output()
+        .map_err(|e| format!("yt-dlp falló: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Error parseando JSON de yt-dlp: {}", e))
+}
+```
+
+#### Output de ejemplo
+
+```bash
+$ darkdm descargar "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+🔍 Detectado: YouTube (vía yt-dlp)
+📹 Rick Astley - Never Gonna Give You Up
+   Duración: 3:32 | Mejor calidad: 1080p DASH
+
+⬇️  Descargando...
+[youtube] dQw4w9WgXcQ: Downloading webpage
+[youtube] dQw4w9WgXcQ: Downloading android player API JSON
+[download] Destination: Rick Astley - Never Gonna Give You Up.f137.mp4
+[download] ━━━━━━━━━━━━━━━━━━━╸━━━━━ 65% • 8.2 MB/s • ETA: 0:45
+[download] Destination: Rick Astley - Never Gonna Give You Up.f140.m4a
+[download] ━━━━━━━━━━━━━━━━━━━━━━━━━ 100% • 3.4 MB/s
+[Merger] Merging video + audio into Rick Astley - Never Gonna Give You Up.mp4
+
+✅ Completo: ~/Descargas/DarkDM/Rick Astley - Never Gonna Give You Up.mp4
+   Tamaño: 42 MB | Duración: 3:32 | 1080p
+```
+
+```bash
+$ darkdm info "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+📹 Rick Astley - Never Gonna Give You Up
+   Canal: Rick Astley
+   Duración: 3:32
+   Publicado: 2009-10-25
+   Vistas: 1.5B
+   
+Formatos disponibles:
+  18  360p  mp4      video+audio  22 MB
+  22  720p  mp4      video+audio  45 MB
+  137 1080p mp4      video only   38 MB  ← mejor video
+  140       m4a      audio only    3 MB  ← mejor audio
+  💡 Recomendado: 137+140 (1080p DASH, 42 MB)
+```
+
+#### yt-dlp: dependencia opcional
+
+A diferencia del resto del engine que es Rust nativo, YouTube **requiere yt-dlp**.
+
+```bash
+# Instalación
+pip install yt-dlp
+# o
+sudo pacman -S yt-dlp
+# o
+sudo apt install yt-dlp
+```
+
+Si no está instalado:
+
+```bash
+darkdm descargar "https://youtube.com/watch?v=xxxx"
+# ⚠️ yt-dlp no está instalado
+# → Para descargar de YouTube necesitas yt-dlp:
+#   pip install yt-dlp
+# → O usa la extensión de Chrome (no requiere yt-dlp)
+```
+
+#### Compatibilidad: más que YouTube
+
+yt-dlp soporta **más de 1000 sitios**. El plugin YouTube también funcionará para:
+
+| Sitio | URL de ejemplo |
+|-------|----------------|
+| YouTube | `youtube.com/watch?v=...` |
+| Vimeo | `vimeo.com/123456789` |
+| TikTok | `tiktok.com/@user/video/...` |
+| Twitter/X | `twitter.com/user/status/...` |
+| Twitch | `twitch.tv/videos/...` |
+| Instagram | `instagram.com/p/...` |
+| Facebook | `facebook.com/watch/...` |
+| Dailymotion | `dailymotion.com/video/...` |
+| Bilibili | `bilibili.com/video/...` |
+| Reddit | `reddit.com/r/.../comments/...` |
+
+Cualquier URL que yt-dlp soporte, DarkDM también.
 
 ## Multi-hilo (como IDM)
 
