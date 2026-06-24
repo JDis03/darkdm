@@ -1,228 +1,285 @@
-# DarkDM — Gestor de Descargas para Linux (como IDM)
+# DarkDM — Modern Download Manager for Linux
 
-DarkDM es un gestor de descargas para Linux inspirado en **IDM (Internet Download Manager)**.
-Detecta y descarga archivos, streams de video y contenido desde cualquier sitio web.
+DarkDM is a **download manager for Linux** inspired by the architecture of [Internet Download Manager (IDM)](https://www.internetdownloadmanager.com/) for Windows. It's being built as a native Rust application with a Tauri frontend, designed from the ground up to be fast, extensible, and reliable.
 
-## Estado actual
+**⚠️ This project is in active development.** The core architecture is defined in a [detailed specification](openspec/changes/native-cli/). A working bash-based MediaFire downloader and a Chrome extension for HLS stream capture are available today.
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                                                                  │
-│  🟢 Bash scripts (funcional)   →   🟡 Spec completado           │
-│  ↓                                 ↓                            │
-│  darkdm-mediafire                openspec/changes/native-cli/   │
-│  darkdm-capture                  (2000+ líneas)                 │
-│  darkdm-cli                                                      │
-│  (Rust, solo HLS)                                                │
-│                                                                  │
-│  🔵 FUTURO: darkdm CLI nativo en Rust                           │
-│  → Engine compartido con Tauri                                   │
-│  → Multi-hilo, resume, plugins, pipeline                         │
-│  → Reemplaza todos los scripts                                   │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
-```
+---
 
-| Componente | Estado | Descripción |
-|---|---|---|
-| `darkdm-mediafire` (bash) | ✅ **Funcional** | Descarga desde MediaFire con `--get-link`, `--password`, resume, extracción RAR/ZIP/7z |
-| `darkdm-cli` (Rust) | ⚠️ Solo HLS | Descarga streams .m3u8 vía ffmpeg |
-| `darkdm-host` (Rust) | ✅ **Funcional** | Servidor HTTP para la extensión de Chrome |
-| Extension Chrome (MV3) | ✅ **Funcional** | Detecta streams HLS automáticamente |
-| Tauri App (Svelte + Rust) | ✅ **Funcional** | Lista archivos descargados |
-| **Spec CLI nativo** (openspec) | ✅ **Completado** | 2000+ líneas con patrones: Pipeline, State Machine, Plugin Registry, Event System |
-| CLI nativo en Rust | 🔜 **Próximo** | Engine compartido con Tauri, multi-hilo, resume, plugins |
+## Philosophy
 
-## Scripts disponibles hoy
+IDM on Windows sets the standard: a browser extension captures download URLs, passes them to a native download engine, and that engine handles the rest — multi-threaded downloads, resume support, queue management, and post-processing (archive extraction, video conversion).
 
-### `darkdm-mediafire` — Descarga desde MediaFire
-
-```bash
-# Descargar y extraer automáticamente
-darkdm-mediafire "https://www.mediafire.com/file/XXXX/archivo.rar/file"
-
-# Con contraseña para RAR protegido
-darkdm-mediafire "https://www.mediafire.com/file/XXXX/archivo.rar/file" --password "mipass"
-
-# Solo obtener el enlace directo (sin descargar)
-darkdm-mediafire "https://www.mediafire.com/file/XXXX/archivo.rar/file" --get-link
-
-# Usar enlace directo (si ya lo tienes)
-darkdm-mediafire --direct "https://download1350.mediafire.com/.../archivo.rar"
-
-# Destino personalizado
-darkdm-mediafire "https://..." ~/Videos --password "mipass"
-```
-
-**Comportamiento:**
-- Extrae automáticamente el link directo de la página de MediaFire
-- Descarga con curl (resume con `-C -`, timeout 1h, barra de progreso)
-- Extrae automáticamente: RAR (con/sin contraseña), ZIP, 7z, tar.gz, tar.xz
-- Conserva siempre el archivo original (nunca se borra)
-- Los videos extraídos van a `~/Descargas/DarkDM/` por defecto
-
-### `darkdm-cli` — Descarga streams HLS
-
-```bash
-darkdm-cli "https://cdn.ejemplo.com/stream.m3u8" video.mp4
-darkdm-cli "https://cdn.ejemplo.com/stream.m3u8" --referer "https://sitio.com"
-```
-
-### `darkdm-capture` — Captura nativa de tráfico TLS
-
-```bash
-darkdm-capture start   # Inicia tcpdump + SSLKEYLOGFILE
-darkdm-vivaldi         # Abre Vivaldi con claves TLS
-darkdm-capture stop    # Detiene y extrae segmentos .ts del PCAP
-```
-
-### `darkdm-host` — Servidor HTTP para la extensión
-
-```bash
-# Iniciar manualmente
-darkdm-host
-
-# O como servicio systemd
-systemctl --user start darkdm-host
-```
-
-## Extensión de Chrome
+DarkDM follows the same model on Linux:
 
 ```
-extension/
-├── manifest.json        ← MV3
-├── background.js        ← Detecta streams .m3u8 via webRequest
-├── content.js           ← Overlay flotante sobre videos
-├── hook.js              ← Intercepta fetch/XHR en la página
-├── popup/               ← Lista de streams detectados + botón descargar
-└── icons/
+Browser Extension              Native Engine (Rust)
+     │                               │
+     │  Captures URL + Headers       │
+     ├──────────────────────────────►│
+     │                               │
+     │                               ├── Pipeline: Resolve → Extract → Download → Process
+     │                               ├── Multi-threaded (Range headers, segmented)
+     │                               ├── Auto-resume on interruption
+     │                               ├── Plugin registry for site-specific extractors
+     │                               └── Event system → terminal UI + GUI
+     │                               │
+     │                          ┌────┴────┐
+     │                          │  Tauri  │
+     │                          │  (Svelte│
+     │                          │   GUI)  │
+     │                          └─────────┘
 ```
 
-La extensión:
-1. Detecta automáticamente streams HLS via `webRequest.onSendHeaders`
-2. Muestra un overlay "⬇️ Descargar" sobre los videos
-3. Envía la descarga al `darkdm-host` via HTTP POST
-4. Soporta MV3 service workers (usa HTTP, no native messaging)
+The difference from IDM: DarkDM is **open-source**, **Rust-native** (no C++), and designed with **modern software patterns** — Pipeline, State Machine, Plugin Registry, Event System — making it maintainable and extensible.
 
-## Spec del CLI nativo (próximo)
+---
 
-El spec en `openspec/changes/native-cli/` define el futuro CLI `darkdm` en Rust:
+## What It Does
 
-```bash
-# Ejemplo de cómo funcionará (no implementado aún)
-darkdm descargar "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-darkdm descargar "https://mediafire.com/file/XXXX/archivo.rar/file" --password "x"
-darkdm descargar "https://cdn.ejemplo.com/video.mp4" --threads 8
-darkdm info "https://www.youtube.com/watch?v=..."
-```
+### Today (working)
 
-### Patrones de diseño (2000+ líneas de spec)
+| Feature | How | Status |
+|---------|-----|--------|
+| **MediaFire downloads** | `darkdm-mediafire` (bash) — extracts direct link, downloads, extracts RAR/ZIP/7z | ✅ |
+| **HLS stream capture** | Chrome extension detects `.m3u8` + HTTP server downloads via ffmpeg | ✅ |
+| **Chrome extension** | MV3, detects streams via `webRequest`, shows overlay on `<video>` elements | ✅ |
+| **TLS packet capture** | `darkdm-capture` (bash) — SSLKEYLOGFILE + tcpdump + pyshark | ✅ |
+| **Tauri desktop app** | Lists downloaded files in `~/Descargas/DarkDM/` | ✅ |
 
-| Patrón | Descripción |
-|--------|-------------|
-| **Pipeline** | Stages independientes: Resolver → Extraer → Descargar → Post-procesar |
-| **State Machine** | 12 estados con transiciones explícitas (QUEUED → RESOLVING → DOWNLOADING → ...) |
-| **Plugin Registry** | Extractores por sitio: YouTube, MediaFire, Mega, Google Drive + fallback genérico |
-| **Event System** | `broadcast::channel` para terminal (indicatif) y GUI (Tauri events) |
-| **Retry Backoff** | 5 intentos con backoff exponencial 1s→16s + jitter |
-| **Segmented Download** | Multi-hilo tipo IDM con Range headers |
-| **Queue Manager** | Cola FIFO con límite de concurrentes |
+### Tomorrow (spec'd, not yet implemented)
 
-### Dependencias planeadas
+| Feature | How | Status |
+|---------|-----|--------|
+| **Unified CLI** | `darkdm descargar <url>` — one command for everything | 🔜 |
+| **Multi-threaded downloads** | Segmented download with `Range` headers (like IDM) | 🔜 Spec'd |
+| **Auto-resume** | Detect partial files, resume with `Range: bytes=X-` | 🔜 Spec'd |
+| **YouTube & 1000+ sites** | Plugin system calling `yt-dlp` | 🔜 Spec'd |
+| **Generic page analyzer** | Extract video/download links from any HTML page | 🔜 Spec'd |
+| **Archive extraction** | RAR/ZIP/7z/tar.gz/tar.xz — password support | 🔜 Spec'd |
+| **Download queue** | Concurrent downloads with priority | 🔜 Spec'd |
+| **Tauri integration** | Shared engine → real-time progress in GUI | 🔜 Spec'd |
 
-```toml
-clap = "4"          # CLI argument parser
-reqwest = "0.12"    # HTTP client nativo
-scraper = "0.20"    # HTML parsing (CSS selectors)
-indicatif = "0.17"  # Barra de progreso en terminal
-tokio = "1"         # Async runtime
-zip = "2"           # Extracción ZIP
-tar = "0.4"         # Extracción tar
-```
+---
 
-## Estructura del proyecto
+## Architecture
+
+### Current (transitional)
 
 ```
-├── src-tauri/              ← Tauri Desktop App (Svelte + Rust)
-│   ├── src/lib.rs          ← Lógica Tauri (listar descargas)
-│   └── src-tauri/src/      ← Binarios y engine (futuro)
+extension/              Chrome MV3 extension
+  ├── background.js     Captures .m3u8 streams via webRequest
+  ├── content.js        Hover overlay on <video> elements
+  └── popup/            Stream list + download button
+
+native-host/            Rust binaries (legacy)
+  ├── darkdm-host       HTTP server on :8765 (serves extension)
+  ├── darkdm-cli        HLS downloader (calls ffmpeg)
+  ├── darkdm-proxy      Forward proxy for video capture
+  └── darkdm-proxy-mitm Async CONNECT proxy
+
+scripts/                Bash utilities (working)
+  ├── darkdm-mediafire  MediaFire downloader + extractor
+  ├── darkdm-capture    TLS key logging + pcap extraction
+  └── watch-downloads.sh Terminal download monitor
+```
+
+### Target (native Rust CLI + Tauri)
+
+```
+src-tauri/src/
+├── lib.rs                    Shared engine (used by CLI + Tauri GUI)
+├── bin/cli.rs               `darkdm` CLI binary (clap)
 │
-├── native-host/            ← Rust HTTP server + CLI
-│   ├── src/server.rs       ← HTTP server en :8765
-│   ├── src/downloader.rs   ← Engine HLS/DASH
-│   ├── src/bin/cli.rs      ← CLI para HLS
-│   └── src/bin/proxy*.rs   ← Proxies de captura
-│
-├── extension/              ← Chrome MV3 Extension
-│   ├── background.js       ← Detección de streams
-│   ├── content.js          ← Overlay de descarga
-│   └── popup/             ← UI de streams detectados
-│
-├── scripts/                ← Bash scripts funcionales
-│   ├── darkdm-mediafire    ← Descarga desde MediaFire
-│   ├── darkdm-capture      ← Captura TLS nativa
-│   ├── darkdm-debug        ← Logs en tiempo real
-│   ├── darkdm-vivaldi      ← Vivaldi con SSLKEYLOGFILE
-│   └── watch-downloads.sh  ← Monitor de descargas
-│
-├── openspec/               ← Spec-driven development
-│   └── changes/native-cli/ ← Spec del CLI nativo (2000+ líneas)
-│
-├── docs/                   ← Documentación
-├── dist/                   ← Build output
-├── init.sh                 ← Verificación del proyecto
-├── install.sh              ← Instalación de extensión + host
-├── feature_list.json       ← Estado de features
-└── progress.md             ← Log de sesiones
+└── downloader/               Core engine
+    ├── pipeline.rs           Pipeline orchestrator
+    ├── state.rs              State machine (12 states)
+    ├── events.rs             Event broadcast channel
+    ├── queue.rs              Concurrent download queue
+    ├── retry.rs              Exponential backoff
+    │
+    ├── stages/               Pipeline stages
+    │   ├── url_resolver.rs   HEAD request → detect type
+    │   ├── link_extractor.rs Plugin registry dispatch
+    │   ├── download_engine.rs
+    │   │   ├── direct.rs     Single-thread download
+    │   │   ├── segmented.rs  Multi-thread with Range
+    │   │   └── resume.rs     Partial file recovery
+    │   ├── hls.rs            HLS manifest parser
+    │   ├── dash.rs           DASH manifest parser
+    │   └── post_processor.rs
+    │       ├── extract.rs    Archive extraction
+    │       └── organizer.rs  File organization
+    │
+    └── plugins/              Site extractors
+        ├── mod.rs            Registry + SiteExtractor trait
+        ├── mediafire.rs      MediaFire page scraper
+        ├── youtube.rs        yt-dlp wrapper
+        ├── mega.rs           Mega.nz (future)
+        ├── googledrive.rs    Google Drive (future)
+        ├── hls.rs            HLS URL detector
+        ├── dash.rs           DASH URL detector
+        └── generic_page.rs   Fallback HTML parser
+
+extension/                    Chrome MV3 extension (unchanged)
+
+native-host/                  Legacy (will be deprecated)
 ```
 
-## Instalación
+---
+
+## Design Patterns
+
+The engine is built on **8 standard patterns** used by IDM, aria2, yt-dlp, and JDownloader:
+
+| Pattern | Used By | Role |
+|---------|---------|------|
+| **Pipeline** | IDM, aria2 | Each download passes through independent stages (Resolve → Extract → Download → Process) |
+| **State Machine** | aria2, JDownloader | 12 explicit states with validated transitions — no invalid states possible |
+| **Plugin Registry** | yt-dlp (1000+ extractors) | `SiteExtractor` trait with priority-based auto-detection per URL |
+| **Event System** | aria2 (RPC), IDM (COM) | `broadcast::channel` — terminal (indicatif) and GUI (Tauri) as consumers |
+| **Retry Backoff** | aria2, curl | 5 retries with exponential backoff 1s→16s + random jitter |
+| **Segmented Download** | IDM (core feature) | Parallel `Range` requests → assemble on completion |
+| **Queue Manager** | IDM, JDownloader | FIFO queue with configurable concurrency limit |
+| **Observer** | All major DM | Reactive UI updates via event streaming |
+
+The full spec (2013 lines) is at [`openspec/changes/native-cli/design.md`](openspec/changes/native-cli/design.md).
+
+---
+
+## Quick Start
+
+### Prerequisites
 
 ```bash
-# 1. Clonar
-git clone https://github.com/JDis/darkdm && cd darkdm
+# Required for current scripts
+sudo pacman -S curl unrar p7zip ffmpeg
+```
 
-# 2. Verificar entorno
+### Clone and build
+
+```bash
+git clone https://github.com/JDis03/darkdm.git
+cd darkdm
+
+# Verify environment
 ./init.sh
 
-# 3. Scripts (disponibles en ~/.local/bin/)
+# Build native host (for Chrome extension support)
+cd native-host && cargo build --release
+cp target/release/darkdm-host ~/.local/bin/
+```
+
+### Chrome Extension
+
+1. Open `vivaldi://extensions` (or `chrome://extensions`)
+2. Enable **Developer Mode**
+3. Click **Load unpacked** → select the `extension/` directory
+4. Visit any streaming site — detected streams appear in the popup
+
+### MediaFire Downloads (bash)
+
+```bash
+# Make scripts available
 export PATH="$PATH:$PWD/scripts"
 cp scripts/darkdm-mediafire ~/.local/bin/
 
-# 4. Native host
-cd native-host && cargo build --release
-cp target/release/darkdm-host ~/.local/bin/
+# Download with auto-extraction
+darkdm-mediafire "https://www.mediafire.com/file/XXXX/archivo.rar/file"
 
-# 5. Extensión de Chrome
-# vivaldi://extensions → Load unpacked → seleccionar extension/
+# With password for protected archives
+darkdm-mediafire "https://..." --password "mypass"
+
+# Extract direct link only (no download)
+darkdm-mediafire "https://..." --get-link
+
+# Custom output directory
+darkdm-mediafire "https://..." ~/Movies --password "mypass"
 ```
 
-## Dependencias
+---
 
-```bash
-# Esenciales (scripts bash)
-sudo pacman -S curl unrar p7zip
+## Chrome Extension
 
-# Native host + CLI Rust
-sudo pacman -S ffmpeg           # Para HLS
-sudo pacman -S rust cargo       # Para compilar native-host
-
-# YouTube (opcional, para el plugin futuro)
-pip install yt-dlp
 ```
+extension/
+├── manifest.json          MV3
+├── background.js          webRequest → detects .m3u8 streams
+├── content.js             Floating "⬇️ Download" overlay on <video>
+├── hook.js                Monkey-patches fetch/XHR for manifest interception
+├── popup/
+│   ├── popup.html         Stream list UI
+│   ├── popup.js           Download button → POST to localhost:8765
+│   └── popup.css
+└── icons/
+```
+
+The extension uses `http://localhost:8765` instead of `chrome.nativeMessaging` because MV3 service workers go to sleep after ~30s, causing `sendNativeMessage` to fail silently. HTTP `fetch()` works reliably regardless of worker lifecycle.
+
+---
+
+## Project Map
+
+```
+├── src-tauri/                  Tauri desktop app (Svelte + Rust)
+│   ├── src/lib.rs              Download listing commands
+│   └── src/main.rs             Entry point
+│
+├── native-host/                Rust binaries (legacy, will merge)
+│   ├── src/server.rs           HTTP server on :8765
+│   ├── src/downloader.rs       HLS/DASH download engine
+│   ├── src/bin/cli.rs          HLS CLI
+│   └── src/bin/proxy*.rs       Network proxies
+│
+├── extension/                  Chrome MV3 extension
+│
+├── scripts/                    Working bash utilities
+│   ├── darkdm-mediafire        MediaFire downloader
+│   ├── darkdm-capture          TLS packet capture
+│   ├── darkdm-debug            Real-time log viewer
+│   ├── darkdm-vivaldi          Launch Vivaldi with SSLKEYLOGFILE
+│   └── watch-downloads.sh      Terminal download monitor
+│
+├── openspec/                   Spec-driven development
+│   └── changes/native-cli/     Full native CLI spec (2013 lines)
+│
+├── init.sh                     Project verification
+├── install.sh                  Extension + host installer
+├── feature_list.json           Feature tracking
+└── progress.md                 Session log
+```
+
+---
+
+## Why Rust?
+
+| Concern | Bash | Rust (native) |
+|---------|------|---------------|
+| **HTTP** | `curl` subprocess | `reqwest` — full control, streaming, Range |
+| **HTML parsing** | `grep`/regex (brittle) | `scraper` — CSS selectors (robust) |
+| **Multi-thread** | Not possible | Native `tokio` + `Range` segmentation |
+| **Resume** | `curl -C -` (fragile) | Programmatic `Range` headers + verification |
+| **Progress** | curl's bar (not capturable) | Callbacks → terminal (`indicatif`) + GUI |
+| **Dependencies** | curl, unrar, ffmpeg, 7z, python | Static binary (~10MB, no deps) |
+| **Error handling** | Exit codes | Typed errors, retry, state machine |
+| **Testing** | Manual | Unit + integration tests |
+
+---
 
 ## Roadmap
 
 ```
-Fase 1  [✅] Bash scripts funcionales (darkdm-mediafire con --get-link, --password, fix gzip, resume)
-Fase 2  [✅] Spec completo del CLI nativo (2000+ líneas, 8 patrones)
-Fase 3  [🔜] Engine de descarga universal en Rust (reqwest, multi-hilo, resume)
-Fase 4  [  ] CLI con clap (descargar, info, --json, --interactive)
-Fase 5  [  ] Page Analyzer genérico + plugins (MediaFire, YouTube, Mega)
-Fase 6  [  ] Integración con Tauri (engine compartido, eventos de progreso)
-Fase 7  [  ] Reemplazar todos los scripts bash por el CLI nativo
+Phase 1  [✅] Working bash scripts + Chrome extension
+Phase 2  [✅] Complete native CLI spec (2013 lines, 8 patterns)
+Phase 3  [  ] Universal download engine in Rust (reqwest, segmented, resume)
+Phase 4  [  ] CLI with clap (subcommands, --json, --interactive)
+Phase 5  [  ] Page analyzer + plugins (MediaFire, YouTube, Mega)
+Phase 6  [  ] Tauri integration (shared engine, progress events)
+Phase 7  [  ] Deprecate bash scripts — all functionality in native CLI
 ```
 
-## Licencia
+---
+
+## License
 
 MIT
