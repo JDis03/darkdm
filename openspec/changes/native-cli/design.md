@@ -714,123 +714,830 @@ if let Err(e) = stage.execute(ctx).await {
 
 ---
 
-### 6. Segmented Download (como IDM)
+### 6. Segmented Download — Dynamic Piece-Splitting (algoritmo de XDM)
 
-IDM descarga archivos en partes paralelas. Esto es lo que lo hace rápido.
+> **Referencia directa de XDM** (`PieceGrabber.cs`, `HTTPDownloaderBase.cs`).
+> XDM **no** divide el archivo en N partes iguales. Empieza con 1 pieza y la divide **dinámicamente** conforme los workers terminan. Esto redistribuye trabajo automáticamente si un servidor es lento en ciertos rangos.
+
+#### ¿Por qué dinámico sobre estático?
+
+```
+─── Estático (DarkDM spec original) ──────────────────────────────
+Inicio:  [──────────────────────────────────────────────────────]
+         T1(0-25%)  T2(25-50%)  T3(50-75%)  T4(75-100%)
+Mitad:   T1 ✅      T2 descarga lento...   T3 ✅  T4 ✅
+Fin:     T1 ✅      T2 sigue...  ← pierde tiempo, los demás esperan
+
+─── Dinámico (algoritmo XDM / DarkDM futuro) ─────────────────────
+Inicio:  [══════════════════════════════════════════════════════]
+         T1 (100% del archivo)
+25%:     [══════]T1✅  [══════════════════════════════]T2 (split)
+50%:     [══════]T1✅  [══════════]T2✅  [════════════]T3 (split)
+75%:     T1✅  T2✅  [══════]T3✅  [══════]T4 (split)
+Fin:     T1✅  T2✅  T3✅  T4✅   ← todos terminan casi juntos
+```
+
+#### Modelo de datos: `Piece`
 
 ```rust
-pub struct SegmentDownloader {
-    client: reqwest::Client,
-    num_threads: u32,
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PieceState {
+    NotStarted,
+    Downloading,
+    Finished,
+    Failed,
 }
 
-impl SegmentDownloader {
-    /// Descarga un archivo en N segmentos paralelos
-    pub async fn download(
-        &self,
-        url: &str,
-        output: &Path,
-        progress: impl Fn(SegmentProgress) + Send + 'static,
-    ) -> Result<DownloadStats, DownloadError> {
-        
-        // 1. HEAD request para obtener metadata
-        let head = self.client.head(url)
-            .send()
-            .await
-            .map_err(|e| DownloadError::network(e))?;
-        
-        let total_size = head
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or(DownloadError::UnknownSize)?;
-        
-        let supports_range = head
-            .headers()
-            .get("accept-ranges")
-            .map(|v| v == "bytes")
-            .unwrap_or(false);
-        
-        if !supports_range || total_size < 1024 * 1024 * 10 { // < 10MB
-            // Archivos pequeños: single thread
-            return self.download_single(url, output, progress).await;
-        }
-        
-        // 2. Dividir en segmentos
-        let segment_size = total_size / self.num_threads as u64;
-        let segments: Vec<Range> = (0..self.num_threads)
-            .map(|i| {
-                let start = i as u64 * segment_size;
-                let end = if i == self.num_threads - 1 {
-                    total_size - 1
-                } else {
-                    start + segment_size - 1
-                };
-                Range { start, end }
-            })
-            .collect();
-        
-        // 3. Descargar segmentos en paralelo
-        let mut handles = Vec::new();
-        let completed = Arc::new(AtomicU64::new(0));
-        
-        for (i, range) in segments.iter().enumerate() {
-            let client = self.client.clone();
-            let url = url.to_string();
-            let output = output.to_path_buf();
-            let seg_file = output.with_extension(format!("part{}", i));
-            let range = *range;
-            let completed = completed.clone();
-            
-            handles.push(tokio::spawn(async move {
-                let mut response = client
-                    .get(&url)
-                    .header("Range", format!("bytes={}-{}", range.start, range.end))
-                    .send()
-                    .await?;
-                
-                let mut file = tokio::fs::File::create(&seg_file).await?;
-                while let Some(chunk) = response.chunk().await? {
-                    file.write_all(&chunk).await?;
-                    completed.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                }
-                Ok::<_, DownloadError>(())
-            }));
-        }
-        
-        // 4. Esperar todos los segmentos
-        for handle in handles {
-            handle.await.map_err(|_| DownloadError::JoinError)??;
-        }
-        
-        // 5. Ensamblar archivo final
-        let mut output_file = tokio::fs::File::create(output).await?;
-        for i in 0..self.num_threads {
-            let seg_file = output.with_extension(format!("part{}", i));
-            let mut seg = tokio::fs::File::open(&seg_file).await?;
-            tokio::io::copy(&mut seg, &mut output_file).await?;
-            tokio::fs::remove_file(&seg_file).await?;
-        }
-        
-        Ok(DownloadStats {
-            total_bytes: total_size,
-            segments: segments.len() as u32,
-            duration: todo!(),
-        })
+#[derive(Debug)]
+pub struct Piece {
+    pub id: PieceId,
+    pub offset: u64,       // byte de inicio en el archivo completo
+    pub length: u64,       // bytes asignados a esta pieza (-1 si desconocido)
+    pub downloaded: AtomicU64, // bytes descargados hasta ahora (hot path)
+    pub state: Mutex<PieceState>,
+    pub stream_type: StreamType,  // Primary | Secondary (para dual-source)
+}
+
+impl Piece {
+    /// Bytes que faltan descargar
+    pub fn remaining(&self) -> u64 {
+        self.length.saturating_sub(self.downloaded.load(Ordering::Relaxed))
+    }
+
+    /// Byte final de esta pieza en el archivo total
+    pub fn end_offset(&self) -> u64 {
+        self.offset + self.length - 1
+    }
+
+    /// ¿Esta pieza puede dividirse? (mínimo 256 KB restantes)
+    pub fn is_splittable(&self) -> bool {
+        self.remaining() > 256 * 1024
     }
 }
 ```
 
+#### Algoritmo: Dynamic Piece-Splitting
+
+```rust
+pub struct PieceManager {
+    pieces: HashMap<PieceId, Piece>,
+    max_active: usize,   // máximo de workers activos simultáneos (default: 8)
+    active: HashSet<PieceId>,
+}
+
+impl PieceManager {
+    /// Llamado cuando un worker termina su pieza o al probar el servidor.
+    /// Busca la pieza más grande y la divide — el nuevo fragmento
+    /// se asigna a un nuevo worker.
+    pub fn try_create_piece(&mut self) -> Option<PieceId> {
+        if self.active.len() >= self.max_active {
+            return None;
+        }
+
+        // 1. Reintentar piezas fallidas sin worker activo
+        if let Some(id) = self.retry_failed() {
+            self.active.insert(id);
+            return Some(id);
+        }
+
+        // 2. Encontrar la pieza con más bytes restantes (la más grande)
+        let split_target = self.pieces.iter()
+            .filter(|(id, p)| {
+                self.active.contains(id)     // debe estar siendo descargada
+                && p.is_splittable()         // mínimo 256KB restantes
+            })
+            .max_by_key(|(_, p)| p.remaining())
+            .map(|(id, _)| *id)?;
+
+        // 3. Dividir la pieza por la mitad
+        let new_id = self.split_piece(split_target)?;
+        self.active.insert(new_id);
+        Some(new_id)
+    }
+
+    fn split_piece(&mut self, id: PieceId) -> Option<PieceId> {
+        let piece = self.pieces.get_mut(&id)?;
+        let remaining = piece.remaining();
+        if remaining < 256 * 1024 { return None; }
+
+        let new_length = remaining / 2;
+        let new_offset = piece.offset + piece.length - new_length;
+
+        // Acortar la pieza original (el final lo toma la nueva pieza)
+        piece.length -= new_length;
+
+        // Crear nueva pieza con la segunda mitad
+        let new_id = PieceId::new_v4();
+        self.pieces.insert(new_id, Piece {
+            id: new_id,
+            offset: new_offset,
+            length: new_length,
+            downloaded: AtomicU64::new(0),
+            state: Mutex::new(PieceState::NotStarted),
+            stream_type: StreamType::Primary,
+        });
+
+        Some(new_id)
+    }
+
+    fn retry_failed(&mut self) -> Option<PieceId> {
+        self.pieces.iter()
+            .filter(|(id, p)| {
+                !self.active.contains(id)
+                && *p.state.lock().unwrap() == PieceState::Failed
+            })
+            .map(|(id, _)| *id)
+            .next()
+    }
+}
+```
+
+#### Worker: `PieceWorker` (porta `PieceGrabber` de XDM)
+
+```rust
+pub struct PieceWorker {
+    piece_id: PieceId,
+    callback: Arc<dyn PieceCallback>,
+    client: reqwest::Client,
+    max_retries: u8,
+}
+
+impl PieceWorker {
+    pub async fn run(&self) -> Result<(), PieceError> {
+        let mut retries = 0u8;
+
+        loop {
+            match self.download_piece().await {
+                Ok(()) => {
+                    self.callback.piece_finished(self.piece_id);
+                    return Ok(());
+                }
+                Err(e) if e.is_retryable() && retries < self.max_retries => {
+                    retries += 1;
+                    let delay = Duration::from_secs(2u64.pow(retries as u32)); // 2s, 4s, 8s
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(e) => {
+                    self.callback.piece_failed(self.piece_id, e.into());
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    async fn download_piece(&self) -> Result<(), PieceError> {
+        let piece = self.callback.get_piece(self.piece_id);
+        let is_first = self.callback.is_first_request(piece.stream_type);
+
+        // Construir Range header
+        let range = if is_first {
+            "bytes=0-".to_string()   // probe: open-ended
+        } else {
+            let start = piece.offset + piece.downloaded.load(Ordering::Relaxed);
+            let end = piece.offset + piece.length - 1;
+            format!("bytes={}-{}", start, end)
+        };
+
+        let headers = self.callback.get_headers(self.piece_id);
+
+        let response = self.client
+            .get(&piece.url)
+            .header("Range", &range)
+            .header("Accept-Encoding", "identity")  // ← CRÍTICO: no comprimir
+            .headers(headers.unwrap_or_default())
+            .send()
+            .await
+            .map_err(PieceError::Network)?;
+
+        // En el primer request: detectar Text Redirect
+        if is_first {
+            if let Some(ct) = response.headers().get("content-type") {
+                if ct == "text/plain" {
+                    // El body es la URL real (algunos CDNs hacen esto)
+                    let new_url = response.text().await?.trim().to_string();
+                    return Err(PieceError::TextRedirect(new_url));
+                }
+            }
+
+            // Extraer ProbeResult y notificar al orchestrator
+            let probe = ProbeResult::from_response(&response);
+            self.callback.piece_connected(self.piece_id, Some(probe));
+        } else {
+            // En requests posteriores: exigir 206 Partial Content
+            if response.status() != 206 {
+                return Err(PieceError::RangeNotSupported);
+            }
+            self.callback.piece_connected(self.piece_id, None);
+        }
+
+        // Stream body → archivo temporal
+        let temp_path = self.callback.piece_file(self.piece_id);
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&temp_path)
+            .await?;
+
+        // Seek al offset ya descargado (resume de pieza parcial)
+        let already = piece.downloaded.load(Ordering::Relaxed);
+        if already > 0 {
+            file.seek(SeekFrom::Start(already)).await?;
+        }
+
+        const BUF: usize = 32 * 1024; // 32 KB buffer
+        let mut stream = response.bytes_stream();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.map_err(PieceError::Network)?;
+            file.write_all(&bytes).await?;
+            piece.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            self.callback.update_bytes(self.piece_id, bytes.len() as u64);
+
+            // Intentar adoptar pieza adyacente (reutilizar conexión TCP)
+            let max_range = piece.offset + piece.length;
+            if self.callback.continue_adjacent(self.piece_id, max_range) {
+                // El orchestrator nos dio más trabajo dentro de esta conexión
+                continue;
+            }
+        }
+
+        Ok(())
+    }
+}
+```
+
+#### `PieceCallback` trait (Inversion of Control)
+
+El worker nunca conoce al orchestrator — solo habla con este trait. Permite testing con mocks:
+
+```rust
+#[async_trait]
+pub trait PieceCallback: Send + Sync {
+    /// ¿Es el primer request para este tipo de stream?
+    fn is_first_request(&self, stream: StreamType) -> bool;
+
+    /// ¿El archivo cambió en el servidor? (Content-Range length diferente)
+    fn file_changed_on_server(&self, id: PieceId, new_size: u64) -> bool;
+
+    /// Obtener datos de la pieza
+    fn get_piece(&self, id: PieceId) -> Arc<Piece>;
+
+    /// Obtener headers HTTP para esta pieza (User-Agent, Cookie, Referer)
+    fn get_headers(&self, id: PieceId) -> Option<HeaderMap>;
+
+    /// El worker se conectó — ProbeResult es Some() solo en el primer request
+    fn piece_connected(&self, id: PieceId, probe: Option<ProbeResult>);
+
+    /// Ruta del archivo temporal para escribir esta pieza
+    fn piece_file(&self, id: PieceId) -> PathBuf;
+
+    /// Worker descargó N bytes — actualizar contadores globales
+    fn update_bytes(&self, id: PieceId, bytes: u64);
+
+    /// ¿Puede el worker adoptar la pieza adyacente sin cerrar la conexión?
+    fn continue_adjacent(&self, id: PieceId, current_range_end: u64) -> bool;
+
+    /// Pieza completada
+    fn piece_finished(&self, id: PieceId);
+
+    /// Pieza falló
+    fn piece_failed(&self, id: PieceId, error: ErrorCode);
+
+    /// Aplicar speed limit si hay uno configurado (bloquea el worker)
+    fn throttle_if_needed(&self);
+}
+```
+
+#### ContinueAdjacentPiece (reutilizar conexión TCP)
+
+Cuando un worker termina su pieza pero el servidor ya envió datos más allá de ese rango, puede adoptar la siguiente pieza sin cerrar la conexión TCP:
+
+```rust
+// En el orchestrator (implementa PieceCallback)
+fn continue_adjacent(&self, id: PieceId, current_range_end: u64) -> bool {
+    let pieces = self.pieces.read().unwrap();
+    let active = self.active.read().unwrap();
+
+    // Buscar pieza que empiece exactamente donde termina la actual
+    let adjacent = pieces.iter().find(|(adj_id, adj_piece)| {
+        adj_piece.offset == current_range_end + 1   // contigua
+        && adj_piece.downloaded.load(Ordering::Relaxed) == 0   // no iniciada
+        && !active.contains(adj_id)                // sin worker activo
+        && adj_piece.stream_type == pieces[&id].stream_type
+    });
+
+    if let Some((adj_id, _)) = adjacent {
+        // Adoptar: el worker continúa leyendo en la misma conexión HTTP
+        // La pieza adyacente ahora es "propiedad" de este worker
+        self.active.write().unwrap().insert(*adj_id);
+
+        // Liberar un slot → intentar crear otra pieza con splitting
+        drop(pieces);
+        drop(active);
+        self.try_create_piece();
+
+        true  // el worker continúa sin cerrar la conexión
+    } else {
+        false // el worker cierra la conexión y termina
+    }
+}
+```
+
+#### ProbeResult — struct del primer HEAD/GET
+
+```rust
+/// Información obtenida del primer request a la URL
+#[derive(Debug, Clone)]
+pub struct ProbeResult {
+    /// Tamaño total del archivo (de Content-Length o Content-Range)
+    pub resource_size: Option<u64>,
+
+    /// ¿El servidor soporta Range requests? (respuesta 206 = sí, 200 = no)
+    pub resumable: bool,
+
+    /// URL final después de todos los redirects
+    pub final_uri: String,
+
+    /// Nombre de archivo sugerido (de Content-Disposition: attachment; filename=...)
+    pub filename: Option<String>,
+
+    /// MIME type del contenido
+    pub content_type: Option<String>,
+
+    /// Última modificación (para detectar si el archivo cambió entre sesiones)
+    pub last_modified: Option<SystemTime>,
+}
+
+impl ProbeResult {
+    pub fn from_response(response: &reqwest::Response) -> Self {
+        let headers = response.headers();
+
+        // Tamaño desde Content-Length o Content-Range
+        let resource_size = headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| {
+                // Content-Range: bytes 0-1023/1234567
+                headers.get("content-range")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.split('/').last())
+                    .and_then(|v| v.parse::<u64>().ok())
+            });
+
+        let resumable = response.status() == 206;
+
+        // Content-Disposition: attachment; filename="archivo.mp4"
+        let filename = headers
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                v.split(';')
+                    .find(|s| s.trim().starts_with("filename="))
+                    .map(|s| s.trim().trim_start_matches("filename=").trim_matches('"').to_string())
+            });
+
+        let content_type = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(';').next().unwrap_or(v).trim().to_string());
+
+        let last_modified = headers
+            .get("last-modified")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| httpdate::parse_http_date(v).ok());
+
+        ProbeResult {
+            resource_size,
+            resumable,
+            final_uri: response.url().to_string(),
+            filename,
+            content_type,
+            last_modified,
+        }
+    }
+}
+```
+
+#### Flujo completo del Progressive Downloader
+
+```
+1. HEAD request → ProbeResult
+   ├── ¿resumable? ¿tamaño conocido?
+   ├── ¿Content-Length < 10MB? → single thread
+   └── ¿disk space suficiente? → error temprano
+
+2. Crear Piece(offset=0, length=total_size)
+   └── Lanzar PieceWorker(piece_0)
+
+3. piece_connected() recibido con ProbeResult:
+   └── try_create_piece() → split piece_0 en piece_0 y piece_1
+       └── Lanzar PieceWorker(piece_1)
+       └── try_create_piece() → split más si hay slots libres
+
+4. Cada vez que un worker termina:
+   └── piece_finished(id)
+       └── try_create_piece() → split la pieza más grande restante
+           └── Lanzar nuevo PieceWorker(new_piece)
+
+5. Progreso (cada 500ms):
+   └── Sumar downloaded de todos los Pieces
+   └── Calcular speed = Δbytes / Δtime
+   └── ETA = (total - downloaded) / speed
+   └── Emitir DownloadEvent::Progress
+
+6. Estado persistido (cada 2s via TransactedIO):
+   └── Serializar todos los Pieces a {id}.pieces
+
+7. Todos los workers terminan:
+   └── Ordenar piezas por offset
+   └── Concatenar archivos temporales → archivo final
+   └── Emitir DownloadEvent::Completed
+```
+
 #### Cuándo usar multi-hilo
 
-| Tamaño archivo | Threads recomendados | Ganancia vs 1 hilo |
-|---------------|---------------------|-------------------|
-| < 10 MB | 1 | Ninguna (overhead no vale la pena) |
-| 10-100 MB | 2 | ~1.5x |
-| 100 MB - 1 GB | 4 | ~2.5x |
-| 1 GB - 10 GB | 8 | ~4x |
-| > 10 GB | 16 | ~5x (limitado por ancho de banda) |
+| Tamaño archivo | Workers recomendados | Ganancia vs 1 worker | Observaciones |
+|---|---|---|---|
+| < 10 MB | 1 | Ninguna | Overhead no vale |
+| 10-100 MB | 2 | ~1.5x | Split 1 vez |
+| 100 MB - 1 GB | 4 | ~2.5x | Split 3 veces |
+| 1 GB - 10 GB | 8 | ~4x | Split 7 veces |
+| > 10 GB | 8-16 | ~5x | Limitado por ancho de banda |
+
+---
+
+### 6b. TransactedIO — Estado crash-safe
+
+> **Referencia directa de XDM** (`TransactedIO.cs`).
+> Si el proceso muere mientras escribe el estado de las piezas, el archivo anterior queda intacto. Usa `rename(2)` que es **atómico en Linux**.
+
+```
+Archivos de estado:
+  {id}.pieces.1   ← estado actual (el válido)
+  {id}.pieces.2   ← backup del estado anterior
+  {id}.pieces.tmp ← escritura en curso (inválido si existe solo)
+
+Rotación al escribir:
+  1. Escribir nuevo estado en .tmp (con marcador END al final)
+  2. Si .1 existe: rename .1 → .2  (backup atómico)
+  3. rename .tmp → .1              (atómico: ahora .1 es el válido)
+
+Al leer (resume después de crash):
+  1. Intentar leer .1, validar marcador END
+  2. Si .1 inválido: intentar leer .2
+  3. Si ambos inválidos: descarga desde cero
+```
+
+```rust
+const END_MARKER: &[u8] = b"END.";
+
+pub struct TransactedIO;
+
+impl TransactedIO {
+    pub fn write(path: &Path, data: &[u8]) -> io::Result<()> {
+        let p1 = path.with_extension("1");
+        let p2 = path.with_extension("2");
+        let tmp = path.with_extension("tmp");
+
+        // Escribir a .tmp con marcador END
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.write_all(END_MARKER)?;
+        f.flush()?;
+        drop(f);
+
+        // Rotar: .1 → .2 (backup), .tmp → .1 (nuevo válido)
+        if p1.exists() {
+            fs::rename(&p1, &p2)?;  // atómico en Linux
+        }
+        fs::rename(&tmp, &p1)?;     // atómico en Linux
+
+        Ok(())
+    }
+
+    pub fn read(path: &Path) -> io::Result<Vec<u8>> {
+        let p1 = path.with_extension("1");
+        let p2 = path.with_extension("2");
+
+        for candidate in [&p1, &p2] {
+            if let Ok(data) = fs::read(candidate) {
+                if data.ends_with(END_MARKER) {
+                    // Válido: quitar el marcador y retornar
+                    return Ok(data[..data.len() - END_MARKER.len()].to_vec());
+                }
+            }
+        }
+
+        Err(io::Error::new(io::ErrorKind::NotFound, "No valid state file found"))
+    }
+}
+
+/// Serialización del estado de piezas para persistencia
+fn serialize_pieces(pieces: &HashMap<PieceId, Piece>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(pieces.len() as u32).to_le_bytes());
+    for (id, piece) in pieces {
+        buf.extend_from_slice(id.as_bytes());
+        buf.extend_from_slice(&piece.offset.to_le_bytes());
+        buf.extend_from_slice(&piece.length.to_le_bytes());
+        buf.extend_from_slice(&piece.downloaded.load(Ordering::Relaxed).to_le_bytes());
+        buf.push(*piece.state.lock().unwrap() as u8);
+        buf.push(piece.stream_type as u8);
+    }
+    buf
+}
+```
+
+---
+
+### 6c. Resume automático
+
+El resume ocurre en dos niveles:
+
+**Nivel 1 — Resume entre sesiones** (el proceso fue cerrado):
+
+```rust
+pub async fn resume_or_start(
+    url: &str,
+    output: &Path,
+    state_path: &Path,
+) -> DownloadTask {
+    // 1. ¿Existe estado guardado?
+    if let Ok(data) = TransactedIO::read(state_path) {
+        if let Ok(pieces) = deserialize_pieces(&data) {
+            // Verificar que el archivo no cambió en el servidor
+            let probe = probe_url(url).await?;
+            let saved_size = pieces.values().map(|p| p.length).sum::<u64>();
+
+            if probe.resource_size == Some(saved_size)
+                && probe.resumable {
+                // Reanudar desde donde se quedó
+                return DownloadTask::resume(pieces, probe);
+            }
+        }
+    }
+    // 2. No hay estado válido → empezar desde cero
+    DownloadTask::start_fresh(url, output)
+}
+```
+
+**Nivel 2 — Resume dentro de una pieza** (conexión TCP cortada):
+
+```rust
+// En PieceWorker.download_piece():
+// Seek al offset ya descargado antes de escribir
+let already = piece.downloaded.load(Ordering::Relaxed);
+if already > 0 {
+    file.seek(SeekFrom::Start(already)).await?;
+    // El Range header incluye el offset:
+    // Range: bytes={offset + already}-{offset + length - 1}
+}
+```
+
+---
+
+### 6d. Accept-Encoding: identity (regla crítica)
+
+> **Aprendido de XDM**: Si el servidor comprime la respuesta (`gzip`, `br`, etc.), el `Content-Length` reportado corresponde al tamaño **comprimido**, no al real. Esto rompe los cálculos de Range porque:
+> - El archivo real es más grande que `Content-Length`
+> - Los byte ranges no corresponden a offsets reales en el archivo
+
+```rust
+// SIEMPRE en todos los requests del download engine:
+client
+    .get(url)
+    .header("Accept-Encoding", "identity")  // ← forzar sin compresión
+    .header("Range", range)
+    .send()
+    .await?;
+```
+
+Regla: `Accept-Encoding: identity` va en **todos** los requests del engine (probe, pieces, segments). No hay excepción.
+
+---
+
+### 6e. Text Redirect Detection
+
+Algunos CDNs no responden con el archivo directamente — responden con `Content-Type: text/plain` y el body es la URL real:
+
+```rust
+// En PieceWorker, primer request únicamente:
+if is_first_request {
+    let ct = response.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if ct.starts_with("text/plain") {
+        let new_url = response.text().await?.trim().to_string();
+        if new_url.starts_with("http") {
+            return Err(PieceError::TextRedirect(new_url));
+        }
+    }
+}
+
+// El orchestrator captura TextRedirect y reintenta con la nueva URL:
+match worker.run().await {
+    Err(PieceError::TextRedirect(new_url)) => {
+        // Actualizar URL y reintentar
+        self.update_url(&piece_id, new_url);
+        self.retry_piece(piece_id);
+    }
+    _ => {}
+}
+```
+
+---
+
+### 6f. Session Expiry Detection
+
+Si ya se descargaron bytes y luego el servidor responde con `401/403`, la sesión expiró (cookies caducadas). Es un error diferente a un `403` desde el principio:
+
+```rust
+impl PieceWorker {
+    fn classify_error(&self, status: StatusCode, already_downloaded: u64) -> PieceError {
+        match status {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                if already_downloaded > 0 {
+                    // Ya teníamos sesión, se expiró
+                    PieceError::SessionExpired
+                } else {
+                    // Nunca tuvimos acceso
+                    PieceError::AccessDenied
+                }
+            }
+            StatusCode::NOT_FOUND => PieceError::NotFound,
+            s if s.is_server_error() => PieceError::ServerError(s.as_u16()),
+            s => PieceError::UnexpectedStatus(s.as_u16()),
+        }
+    }
+}
+
+// En el CLI, SessionExpired muestra un mensaje específico:
+// ❌ La sesión expiró (las cookies se invalidaron durante la descarga)
+// → Pausa la descarga y vuelve a iniciar sesión en el sitio
+// → Luego: darkdm reanudar <url> --cookie "nueva_cookie=valor"
+```
+
+---
+
+### 6g. Disk Space Check
+
+Antes de iniciar cualquier descarga grande, verificar espacio disponible tanto en el directorio temporal como en el destino final:
+
+```rust
+pub fn check_disk_space(
+    temp_dir: &Path,
+    output_dir: &Path,
+    needed_bytes: u64,
+) -> Result<(), DownloadError> {
+    // En Linux: statvfs syscall
+    let temp_free = available_space(temp_dir)?;
+    let output_free = available_space(output_dir)?;
+
+    // Para archivos multi-pieza necesitamos espacio en TEMP
+    // para las piezas + espacio en OUTPUT para el archivo final
+    // Total = 2x el tamaño (piezas temporales + archivo final)
+    let needed_total = needed_bytes * 2;
+
+    if temp_free < needed_bytes {
+        return Err(DownloadError::InsufficientDiskSpace {
+            location: temp_dir.to_path_buf(),
+            needed: needed_bytes,
+            available: temp_free,
+        });
+    }
+    if output_free < needed_bytes {
+        return Err(DownloadError::InsufficientDiskSpace {
+            location: output_dir.to_path_buf(),
+            needed: needed_bytes,
+            available: output_free,
+        });
+    }
+    Ok(())
+}
+
+// Crate disponible: `fs2` o `statvfs`
+// fs2::available_space(path) -> u64
+```
+
+---
+
+### 6h. Speed Limiter (opcional, como XDM)
+
+Si el usuario configura un límite de velocidad (ej: 1 MB/s para no saturar la red), el limiter bloquea cada worker cuando va demasiado rápido:
+
+```rust
+pub struct SpeedLimiter {
+    limit_bytes_per_sec: Option<u64>,  // None = sin límite
+    last_check: Instant,
+    bytes_since_check: u64,
+    cancel: Arc<Notify>,  // despertable en Stop()
+}
+
+impl SpeedLimiter {
+    pub async fn throttle(&mut self, bytes_written: u64) {
+        let Some(limit) = self.limit_bytes_per_sec else { return };
+
+        self.bytes_since_check += bytes_written;
+        let elapsed = self.last_check.elapsed().as_millis() as u64;
+
+        let max_bytes_per_ms = limit / 1000;
+        let expected_ms = self.bytes_since_check / max_bytes_per_ms;
+
+        if elapsed < expected_ms {
+            let sleep_ms = expected_ms - elapsed;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {}
+                _ = self.cancel.notified() => {}  // se despierta en Stop()
+            }
+        }
+
+        if self.last_check.elapsed() > Duration::from_millis(1000) {
+            self.last_check = Instant::now();
+            self.bytes_since_check = 0;
+        }
+    }
+}
+```
+
+---
+
+### 6i. Auto-rename en conflictos de nombre
+
+```rust
+pub fn resolve_output_path(dir: &Path, filename: &str) -> PathBuf {
+    let path = dir.join(filename);
+    if !path.exists() {
+        return path;
+    }
+
+    let stem = Path::new(filename)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let ext = Path::new(filename)
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+
+    for i in 1..=999 {
+        let candidate = dir.join(format!("{} ({}){}", stem, i, ext));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // Fallback con timestamp
+    dir.join(format!("{} ({}){}", stem, chrono::Utc::now().timestamp(), ext))
+}
+```
+
+---
+
+### 6j. HLS con Byte-Range
+
+Algunos playlists HLS almacenan múltiples segmentos en un solo archivo, accedidos por byte ranges:
+
+```
+#EXTM3U
+#EXTINF:10.0,
+#EXT-X-BYTERANGE:1048576@0
+video.ts
+#EXTINF:10.0,
+#EXT-X-BYTERANGE:1048576@1048576
+video.ts
+```
+
+El parser HLS debe acumular el offset y emitir un `Chunk` con `Range` header:
+
+```rust
+#[derive(Debug)]
+pub struct HlsChunk {
+    pub url: String,
+    pub byte_range: Option<ByteRange>,  // Some(start, len) si es byterange
+    pub duration: f64,
+    pub sequence: u32,
+}
+
+#[derive(Debug)]
+pub struct ByteRange {
+    pub offset: u64,
+    pub length: u64,
+}
+
+// El downloader de chunks usa Range si byte_range es Some:
+if let Some(range) = &chunk.byte_range {
+    request = request.header(
+        "Range",
+        format!("bytes={}-{}", range.offset, range.offset + range.length - 1)
+    );
+}
+```
 
 ---
 
@@ -1805,56 +2512,9 @@ yt-dlp soporta **más de 1000 sitios**. El plugin YouTube también funcionará p
 
 Cualquier URL que yt-dlp soporte, DarkDM también.
 
-## Multi-hilo (como IDM)
+## Multi-hilo y Resume
 
-IDM descarga archivos en **particiones** con múltiples conexiones:
-
-```
-Archivo: 100 MB
-Thread 1: bytes 0-25M
-Thread 2: bytes 25M-50M
-Thread 3: bytes 50M-75M
-Thread 4: bytes 75M-100M
-```
-
-El engine debe:
-1. Hacer HEAD request para obtener tamaño total
-2. Verificar que el servidor soporta Range headers
-3. Dividir en N partes iguales
-4. Descargar cada parte en paralelo
-5. Ensamblar al final
-
-```rust
-pub fn download_with_segments(
-    url: &str,
-    total_size: u64,
-    num_threads: u32,
-    output: &Path,
-    progress: impl Fn(ProgressInfo),
-) -> Result<(), String> {
-    let segment_size = total_size / num_threads as u64;
-    
-    // Lanzar N threads, cada uno con su Range
-    for i in 0..num_threads {
-        let start = i as u64 * segment_size;
-        let end = if i == num_threads - 1 { total_size - 1 } else { start + segment_size - 1 };
-        // GET con Range: bytes={start}-{end}
-        // Escribir en archivo temporal
-        // Reportar progreso
-    }
-    
-    // Ensamblar archivos temporales
-}
-```
-
-## Resume automático
-
-```
-1. Verificar si ya existe archivo parcial en output_dir
-2. Comparar tamaño con Content-Length del servidor
-3. Si es menor → GET con Range: bytes={existing_size}-
-4. Append al archivo existente
-```
+> Cubierto en detalle en las secciones **6a** (Dynamic Piece-Splitting), **6b** (TransactedIO), y **6c** (Resume automático) dentro de los Patrones de diseño estándar.
 
 ## Extracción de archives
 
@@ -1951,39 +2611,55 @@ chrono = "0.4"             # Timestamps
 
 **Rationale**: Control total (headers, streaming, Range), sin dependencias externas, comparte tipos con Tauri.
 
-### 3. Multi-hilo con Range (como IDM)
+### 3. Dynamic piece-splitting (no estático) — algoritmo de XDM
 
-**Decisión**: Implementar particionado de archivos con Range headers.
+**Decisión**: Usar el algoritmo de splitting dinámico de XDM en lugar de dividir el archivo en N partes iguales al inicio.
 
-**Rationale**: IDM descarga archivos grandes ~3x más rápido con 4-8 hilos. reqwest soporta Range nativamente.
+**Rationale**: El splitting dinámico redistribuye trabajo automáticamente si un servidor es lento en un rango específico. Empieza con 1 pieza y divide la más grande conforme los workers terminan. Referencia: `HTTPDownloaderBase.cs` de XDM.
 
-### 4. Page Analyzer genérico, plugins site-specific
+### 4. TransactedIO para estado crash-safe
 
-**Decisión**: El page analyzer busca enlaces genéricamente (video tags, anchors, scripts). Los site-plugins (MediaFire, Mega) son solo un extra.
+**Decisión**: Persistir el estado de las piezas con rotación de 3 archivos y marcador END validado.
 
-**Rationale**: No podemos tener scrapers para cada sitio del mundo. Lo genérico cubre el 90%. Los plugins cubren sitios populares.
+**Rationale**: Si el proceso muere durante escritura de estado, el archivo anterior queda intacto gracias a `rename(2)` atómico en Linux. Referencia: `TransactedIO.cs` de XDM.
 
-### 5. Resumen de sesión de descarga
+### 5. Accept-Encoding: identity en todos los requests
 
-**Output del CLI**:
-```bash
-$ darkdm descargar "https://mediafire.com/file/XXXX/archivo.rar/file"
+**Decisión**: Siempre enviar `Accept-Encoding: identity` en los requests del download engine.
 
-Resolviendo... → MediaFire detectado
-Extrayendo enlace directo...
-  → https://download1350.mediafire.com/.../archivo.rar
+**Rationale**: Si el servidor comprime la respuesta, el `Content-Length` corresponde al tamaño comprimido, rompiendo los cálculos de Range. No hay excepción a esta regla. Referencia: `SingleSourceHTTPDownloader.cs` de XDM.
 
-Descargando archivo.rar (2.7 GB)
-  ━━━━━━━━━━━━━━━━━━━━━━╸━━━━━━ 78% • 12.3 MB/s • ETA: 1:23
-  Threads: 4/4 activos
+### 6. PieceCallback trait (Inversion of Control)
 
-✅ Descarga completa (2.7 GB en 2:34)
-📦 Extrayendo... (contraseña: sí)
-  → video.mp4 (1.1 GB)
-  → archivo.rar conservado en ~/Descargas/DarkDM/
-```
+**Decisión**: El worker (`PieceWorker`) solo habla con el trait `PieceCallback`, nunca con el orchestrator directamente.
 
-### 6. Output JSON para todo
+**Rationale**: Desacopla el worker del downloader. Permite tests unitarios con mocks. Referencia: `IPieceCallback.cs` de XDM.
+
+### 7. ContinueAdjacentPiece (reutilizar conexión TCP)
+
+**Decisión**: Cuando un worker termina su pieza y el servidor ya mandó datos del rango siguiente, adoptar la pieza adyacente sin cerrar la conexión TCP.
+
+**Rationale**: Reduce latencia de reconexión en servidores con alta latencia. Referencia: `PieceGrabber.cs` de XDM.
+
+### 8. Page Analyzer genérico + plugins site-specific
+
+**Decisión**: El page analyzer busca enlaces genéricamente (video tags, anchors, scripts). Los site-plugins (MediaFire, YouTube) son un extra.
+
+**Rationale**: No podemos tener scrapers para cada sitio. Lo genérico cubre el 90%. Los plugins cubren sitios populares.
+
+### 9. Session expiry como error diferenciado
+
+**Decisión**: Si ya se descargaron bytes y el servidor responde `401/403`, es `SessionExpired` — diferente a `AccessDenied`.
+
+**Rationale**: El usuario necesita mensajes de error accionables. `SessionExpired` le dice "renueva tu cookie", `AccessDenied` le dice "no tienes acceso". Referencia: `PieceGrabber.cs` de XDM.
+
+### 10. Disk space check antes de descargar
+
+**Decisión**: Verificar espacio disponible en temp y output antes de iniciar la descarga.
+
+**Rationale**: Fallar rápido es mejor que fallar a los 2 GB. Referencia: `SingleSourceHTTPDownloader.cs` de XDM.
+
+### 11. Output JSON para integraciones
 
 Con `--json`, cualquier comando debe output JSON parseable:
 
@@ -1992,22 +2668,58 @@ darkdm descargar "https://..." --json
 # {"status":"success","files":[{"path":"...","size":123}],"duration":154}
 ```
 
+---
+
+## Referencia XDM → DarkDM (tabla de mapeo)
+
+| XDM (C#) | DarkDM (Rust) | Notas |
+|-----------|---------------|-------|
+| `Piece.cs` | `downloader/piece.rs` | Modelo de datos, AtomicU64 para downloaded |
+| `PieceGrabber.cs` | `downloader/stages/piece_worker.rs` | Worker por pieza |
+| `HTTPDownloaderBase.cs` | `downloader/stages/download_engine.rs` | Orchestrator + splitting dinámico |
+| `IPieceCallback` | `PieceCallback` trait | Inversion of control |
+| `TransactedIO.cs` | `downloader/transacted_io.rs` | 3-file rotation + END marker |
+| `SpeedLimiter.cs` | `downloader/speed_limiter.rs` | Wakeable sleep con Notify |
+| `ProbeResult` | `downloader/probe.rs` | Struct del primer HEAD/GET |
+| `SingleSourceHTTPDownloader` | `downloader/stages/direct.rs` | Descarga directa single-source |
+| `DualSourceHTTPDownloader` | N/A | lo hace yt-dlp |
+| `MultiSourceHLSDownloader` | `downloader/stages/hls.rs` | Con byte-range support |
+| `MultiSourceDASHDownloader` | `downloader/stages/dash.rs` | |
+| `HlsParser.cs` | `downloader/parsers/hls.rs` | Con #EXT-X-BYTERANGE |
+| `MpdParser.cs` | `downloader/parsers/dash.rs` | SegmentTemplate |
+| `DownloadQueue.cs` + Scheduler | `downloader/queue.rs` | Cola + horario semanal |
+| `IpcHttpMessageProcessor` | `native-host/src/server.rs` | Ya existe |
+| `FileNameFetchMode` | `resolve_output_path()` | Auto-rename colisiones |
+| `WinHttpClient` / `WinInetClient` | N/A | No necesario en Linux |
+
+---
+
 ## Risks / Trade-offs
 
-- **[Riesgo] Servidores sin Range** → Muchos CDNs no soportan Range (o solo en ciertos casos). Mitigación: detectar Accept-Ranges, fallback a single-thread.
-- **[Riesgo] Rate limiting con multi-hilo** → Algunos servidores limitan conexiones simultáneas. Mitigación: --threads configurable, default conservador (4).
-- **[Riesgo] Content-Length dinámico** → Algunos streams cambian de tamaño. Mitigación: si Content-Length cambia, reiniciar sin Range.
-- **[Trade-off] Rust compile time** → Más lento que bash. Pero se compila una vez y corre sin dependencias.
+- **[Riesgo] Servidores sin Range** → Fallback automático a single-thread tras ProbeResult.
+- **[Riesgo] Rate limiting con multi-hilo** → `--threads` configurable, default conservador (4), splitting dinámico reduce el problema.
+- **[Riesgo] Content-Length dinámico** → Si `Content-Range` difiere del tamaño guardado → `FileChangedOnServer` → reinicio.
+- **[Riesgo] Estado corrupto tras crash** → TransactedIO con rotación de 3 archivos y validación END marker.
+- **[Trade-off] Rust compile time** → ~3min la primera vez. Se compila una vez, corre sin dependencias.
+- **[Trade-off] RAR sigue siendo externo** → unrar CLI, no hay crate Rust maduro para RAR5.
 
 ## Definition of Done
 
-- [ ] `darkdm descargar <direct_url>` descarga con progreso
-- [ ] `darkdm descargar <direct_url> --threads 8` multi-hilo
-- [ ] `darkdm descargar <direct_url> --resume` reanuda si se cortó
-- [ ] `darkdm descargar <mediafire_url>` extrae link + descarga
+- [ ] `darkdm descargar <direct_url>` descarga con barra de progreso
+- [ ] Dynamic piece-splitting funciona (splitting dinámico, no estático)
+- [ ] `ContinueAdjacentPiece` reutiliza conexiones TCP
+- [ ] TransactedIO persiste estado crash-safe
+- [ ] `Accept-Encoding: identity` en todos los requests del engine
+- [ ] Resume entre sesiones funciona (TransactedIO + deserialize pieces)
+- [ ] Resume dentro de pieza funciona (seek + Range offset)
+- [ ] ProbeResult detecta: tamaño, resumable, filename, content-type
+- [ ] Text redirect detection en primer request
+- [ ] Session expiry = error diferenciado de 403 normal
+- [ ] Disk space check antes de empezar
+- [ ] Auto-rename en conflicto de nombre de archivo
 - [ ] `darkdm descargar <mediafire_url> --password x` extrae RAR
-- [ ] `darkdm descargar <hls_url>` descarga stream HLS
-- [ ] `darkdm info <url>` muestra info sin descargar
+- [ ] `darkdm descargar <hls_url>` con byte-range HLS support
 - [ ] `darkdm descargar <url> --json` output JSON
+- [ ] `darkdm info <url>` muestra info sin descargar
 - [ ] `./init.sh` pasa
 - [ ] Engine funciona desde Tauri
