@@ -132,8 +132,833 @@ Los extractors site-specific (MediaFire, etc.) son **plugins opcionales** para c
                     │     │ • 7z (7z CLI)                │      │
                     │     │ • tar.gz/xz (tar crate)      │      │
                     │     └─────────────────────────────┘      │
-                    └──────────────────────────────────────────┘
+                     └──────────────────────────────────────────┘
 ```
+
+---
+
+## Patrones de diseño estándar
+
+### 1. Pipeline Pattern (Chain of Responsibility)
+
+Cada descarga pasa por una cadena de stages independientes. Cada stage hace una cosa y solo una.
+
+```
+     ┌──────────┐    ┌───────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+     │ 1. URL   │    │ 2. Link   │    │ 3. Queue │    │ 4. Down- │    │ 5. Post  │
+     │ Resolver │───►│ Extractor │───►│ Manager  │───►│ load     │───►│ Processor│
+     └──────────┘    └───────────┘    └──────────┘    │ Engine   │    └──────────┘
+                                                      └──────────┘
+```
+
+```rust
+/// Cada stage implementa este trait
+#[async_trait]
+pub trait Stage: Send + Sync {
+    fn name(&self) -> &'static str;
+    async fn execute(&self, ctx: &mut DownloadContext) -> Result<(), StageError>;
+}
+
+/// Contexto compartido entre stages
+#[derive(Debug)]
+pub struct DownloadContext {
+    pub id: Uuid,
+    pub url: String,
+    pub resolved_url: Option<String>,    // después de redirects
+    pub detected_links: Vec<DetectedLink>,
+    pub selected_link: Option<DetectedLink>,
+    pub download_path: Option<PathBuf>,
+    pub extracted_files: Vec<PathBuf>,
+    pub state: DownloadState,
+    pub options: DownloadOptions,
+    pub attempt: u8,
+    pub error: Option<DownloadError>,
+}
+
+/// Pipeline ejecuta stages en orden
+pub struct Pipeline {
+    stages: Vec<Box<dyn Stage>>,
+}
+
+impl Pipeline {
+    pub fn new(stages: Vec<Box<dyn Stage>>) -> Self {
+        Self { stages }
+    }
+
+    pub async fn execute(&self, ctx: &mut DownloadContext) -> PipelineResult {
+        for stage in &self.stages {
+            ctx.state = state_for_stage(stage.name());
+            
+            match stage.execute(ctx).await {
+                Ok(()) => continue,
+                Err(e) if e.is_retryable() && ctx.attempt < MAX_RETRIES => {
+                    ctx.attempt += 1;
+                    let delay = backoff_duration(ctx.attempt); // 2s, 4s, 8s...
+                    tokio::time::sleep(delay).await;
+                    return self.execute(ctx).await; // retry entire pipeline
+                }
+                Err(e) => return PipelineResult::Error(ctx.id, e),
+            }
+        }
+        PipelineResult::Success(ctx.clone())
+    }
+}
+```
+
+#### Beneficios del Pipeline
+
+| Beneficio | Explicación |
+|-----------|-------------|
+| **Aislamiento** | Cada stage es independiente. Si falla el extractor, el downloader no se entera |
+| **Testeable** | Puedes testear cada stage por separado con mocks |
+| **Extensible** | Quieres añadir un stage de "desencriptar"? Solo agregas un Stage |
+| **Observable** | Cada stage emite eventos → progreso detallado en terminal/GUI |
+| **Recuperable** | Sabes exactamente en qué stage falló, puedes reintentar desde ahí |
+
+---
+
+### 2. State Machine Pattern
+
+Cada descarga tiene un ciclo de vida con estados y transiciones **explícitas**.
+
+#### Diagrama de estados
+
+```
+                         ┌─────────────────────────────────────────┐
+                         │                                         │
+                         ▼                                         │
+                    ┌─────────┐                                    │
+                    │ QUEUED  │                                    │
+                    └────┬────┘                                    │
+                         │                                         │
+                    ┌────▼────┐                                    │
+              ┌─────│RESOLVING│─────┐                              │
+              │     └─────────┘     │                              │
+              │                     │                              │
+         ┌────▼───┐          ┌──────▼─────┐                        │
+         │EXTRACT │          │DIRECT_DOWN │                        │
+         └────┬───┘          └──────┬─────┘                        │
+              │                     │                              │
+              │               ┌─────▼──────┐                       │
+              │               │DOWNLOADING │                       │
+              │               └─────┬──────┘                       │
+              │                     │                              │
+              │          ┌──────────┼──────────┐                   │
+              │          │          │          │                   │
+              │     ┌────▼───┐ ┌────▼────┐ ┌───▼────┐             │
+              │     │ PAUSED │ │VERIFYING│ │ ERROR  │──► RETRY ───┘
+              │     └────┬───┘ └────┬────┘ └────────┘
+              │          │          │
+              │     ┌────▼──────────▼────┐
+              │     │    EXTRACTING      │
+              │     └────┬───────────────┘
+              │          │
+              │     ┌────▼────┐
+              └────►│COMPLETED│
+                    └─────────┘
+```
+
+```rust
+/// Estados de una descarga
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum DownloadState {
+    // ─── Espera ───
+    Queued,
+    Waiting { position: usize },
+
+    // ─── Resolución ───
+    Resolving,                              // HEAD request, detectar tipo
+    ExtractingLink,                         // Page analyzer / plugins
+    
+    // ─── Descarga ───
+    DirectDownload { url: String },
+    Downloading {
+        progress: ProgressInfo,
+        segments_completed: u32,
+        segments_total: u32,
+    },
+    Paused,
+    Verifying { checksum: Option<String> },
+    
+    // ─── Post-procesamiento ───
+    ExtractingArchive { file: String },
+    
+    // ─── Final ───
+    Completed(DownloadResult),
+    Error(DownloadError),
+    Retrying { attempt: u8, next_retry_at: Instant },
+    Cancelled,
+}
+
+/// Transiciones válidas definidas en la máquina de estados
+impl DownloadState {
+    /// Retorna los estados SIGUIENTES válidos desde este estado
+    pub fn valid_transitions(&self) -> Vec<DownloadState> {
+        match self {
+            Queued => vec![Resolving, Cancelled],
+            Waiting { .. } => vec![Resolving, Cancelled],
+            Resolving => vec![
+                ExtractingLink,
+                DirectDownload { url: String::new() },
+                Error(DownloadError::unknown()),
+                Cancelled,
+            ],
+            ExtractingLink => vec![
+                DirectDownload { url: String::new() },
+                Error(DownloadError::unknown()),
+                Cancelled,
+            ],
+            DirectDownload { .. } => vec![
+                Downloading {
+                    progress: ProgressInfo::default(),
+                    segments_completed: 0,
+                    segments_total: 0,
+                },
+                Error(DownloadError::unknown()),
+                Cancelled,
+            ],
+            Downloading { .. } => vec![
+                Paused,
+                Verifying { checksum: None },
+                Error(DownloadError::unknown()),
+                Cancelled,
+            ],
+            Paused => vec![
+                Downloading {
+                    progress: ProgressInfo::default(),
+                    segments_completed: 0,
+                    segments_total: 0,
+                },
+                Cancelled,
+            ],
+            Verifying { .. } => vec![
+                ExtractingArchive { file: String::new() },
+                Completed(DownloadResult::default()),
+                Error(DownloadError::unknown()),
+                Cancelled,
+            ],
+            ExtractingArchive { .. } => vec![
+                Completed(DownloadResult::default()),
+                Error(DownloadError::unknown()),
+                Cancelled,
+            ],
+            Error(e) => {
+                let mut next = vec![Cancelled];
+                if e.is_retryable() {
+                    next.push(Retrying {
+                        attempt: 0,
+                        next_retry_at: Instant::now(),
+                    });
+                }
+                next
+            }
+            Retrying { attempt, .. } => {
+                if *attempt < MAX_RETRIES {
+                    vec![Resolving, Cancelled]
+                } else {
+                    vec![Error(DownloadError::max_retries()), Cancelled]
+                }
+            }
+            Completed(_) | Cancelled => vec![], // terminal
+        }
+    }
+
+    /// Verifica si una transición es válida
+    pub fn can_transition_to(&self, next: &DownloadState) -> bool {
+        self.valid_transitions()
+            .iter()
+            .any(|t| std::mem::discriminant(t) == std::mem::discriminant(next))
+    }
+}
+```
+
+#### Por qué State Machine
+
+| Razón | Problema que resuelve |
+|-------|----------------------|
+| **Sin estados inválidos** | No puedes pasar de QUEUED a COMPLETED sin descargar |
+| **Recuperación** | Sabes exactamente dónde falló y qué reintentar |
+| **Persistencia** | Puedes guardar/restaurar el estado (resume entre sesiones) |
+| **UI reactiva** | La GUI/Terminal escucha cambios de estado y se actualiza |
+| **Testing** | Cada transición es testeable |
+
+---
+
+### 3. Plugin Registry Pattern (Strategy)
+
+Los extractores de sitios específicos se registran en un registry que los resuelve automáticamente por URL.
+
+```rust
+/// Cualquier extractor de sitios implementa esto
+#[async_trait]
+pub trait SiteExtractor: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn name(&self) -> &'static str;
+    fn priority(&self) -> u8;           // más alto = primero en probar
+    
+    /// ¿Este extractor puede manejar esta URL?
+    fn can_handle(&self, url: &Url) -> bool;
+    
+    /// Extrae links de descarga de la página
+    async fn extract(&self, url: &Url, ctx: &mut DownloadContext) -> Result<Vec<DetectedLink>, ExtractError>;
+}
+
+/// Registry de extractores
+pub struct ExtractorRegistry {
+    extractors: Vec<Box<dyn SiteExtractor>>,
+}
+
+impl ExtractorRegistry {
+    pub fn default() -> Self {
+        let mut reg = Self { extractors: vec![] };
+        
+        // Ordenado por prioridad:
+        // 1. Plugins específicos (alta prioridad)
+        reg.register(MediaFireExtractor::new());
+        reg.register(YouTubeExtractor::new());    // vía yt-dlp
+        reg.register(MegaExtractor::new());
+        reg.register(GoogleDriveExtractor::new());
+        
+        // 2. Detectores de formato (media prioridad)
+        reg.register(HlsExtractor::new());        // .m3u8
+        reg.register(DashExtractor::new());       // .mpd
+        
+        // 3. Page Analyzer genérico (baja prioridad, fallback)
+        reg.register(GenericPageAnalyzer::new());
+        
+        reg
+    }
+
+    /// Encuentra TODOS los extractores que pueden manejar esta URL
+    pub fn find_for_url(&self, url: &Url) -> Vec<&dyn SiteExtractor> {
+        let mut matched: Vec<&dyn SiteExtractor> = self.extractors
+            .iter()
+            .filter(|e| e.can_handle(url))
+            .map(|e| e.as_ref())
+            .collect();
+        
+        // Ordenar por prioridad descendente
+        matched.sort_by(|a, b| b.priority().cmp(&a.priority()));
+        matched
+    }
+}
+
+/// Ejemplo: Extractor de MediaFire
+pub struct MediaFireExtractor;
+
+#[async_trait]
+impl SiteExtractor for MediaFireExtractor {
+    fn id(&self) -> &'static str { "mediafire" }
+    fn name(&self) -> &'static str { "MediaFire" }
+    fn priority(&self) -> u8 { 100 }
+
+    fn can_handle(&self, url: &Url) -> bool {
+        url.host_str()
+            .map(|h| h.contains("mediafire.com"))
+            .unwrap_or(false)
+    }
+
+    async fn extract(&self, url: &Url, ctx: &mut DownloadContext) -> Result<Vec<DetectedLink>, ExtractError> {
+        let html = reqwest::get(url.as_str())
+            .await
+            .map_err(|e| ExtractError::network(e))?
+            .text()
+            .await
+            .map_err(|e| ExtractError::network(e))?;
+
+        let doc = scraper::Html::parse_document(&html);
+        
+        // Pattern 1: #downloadButton
+        let selector = scraper::Selector::parse("#downloadButton").unwrap();
+        if let Some(btn) = doc.select(&selector).next() {
+            if let Some(href) = btn.value().attr("href") {
+                return Ok(vec![DetectedLink::direct(href)]);
+            }
+        }
+        
+        // Pattern 2: download*.mediafire.com
+        let selector = scraper::Selector::parse("a[href*='download.mediafire.com']").unwrap();
+        for link in doc.select(&selector) {
+            if let Some(href) = link.value().attr("href") {
+                return Ok(vec![DetectedLink::direct(href)]);
+            }
+        }
+
+        Err(ExtractError::not_found("No download button found on MediaFire page"))
+    }
+}
+```
+
+#### Plugins built-in (orden de prioridad)
+
+| Prioridad | Plugin | Detecta |
+|-----------|--------|---------|
+| 100 | **MediaFire** | `mediafire.com/file/...` |
+| 95 | **YouTube** | `youtube.com`, `youtu.be`, vimeo, tiktok, twitch, twitter... |
+| 90 | **Mega** | `mega.nz/file/...` |
+| 85 | **Google Drive** | `drive.google.com/file/...` |
+| 50 | **HLS** | `.m3u8` en URL o content-type |
+| 45 | **DASH** | `.mpd` en URL o content-type |
+| 10 | **Page Analyzer** | Cualquier página HTML (fallback genérico) |
+
+---
+
+### 4. Observer / Event System
+
+El pipeline emite eventos. El CLI y la GUI son observers.
+
+```rust
+/// Tipos de eventos que emite el pipeline
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event")]
+pub enum DownloadEvent {
+    /// Cambio de estado (QUEUED → RESOLVING → ...)
+    StateChanged {
+        download_id: Uuid,
+        old_state: DownloadState,
+        new_state: DownloadState,
+    },
+    
+    /// Progreso de descarga (se emite ~cada 500ms)
+    Progress {
+        download_id: Uuid,
+        bytes_downloaded: u64,
+        total_bytes: Option<u64>,
+        speed_bytes_per_sec: f64,
+        eta_secs: Option<f64>,
+        percent: Option<f64>,
+        active_segments: u32,
+    },
+    
+    /// Stage del pipeline completado
+    StageCompleted {
+        download_id: Uuid,
+        stage: String,
+        duration_ms: u64,
+    },
+    
+    /// Descarga completada
+    Completed {
+        download_id: Uuid,
+        result: DownloadResult,
+    },
+    
+    /// Error recuperable (se va a reintentar)
+    RetryableError {
+        download_id: Uuid,
+        error: DownloadError,
+        attempt: u8,
+        next_retry_in_secs: u64,
+    },
+    
+    /// Error fatal
+    FatalError {
+        download_id: Uuid,
+        error: DownloadError,
+    },
+    
+    /// Descarga cancelada por el usuario
+    Cancelled {
+        download_id: Uuid,
+        partial_path: Option<PathBuf>,
+        downloaded_bytes: u64,
+    },
+}
+
+/// Canal de eventos: el pipeline produce, los observers consumen
+pub type EventChannel = broadcast::Sender<DownloadEvent>;
+
+/// El Pipeline Manager expone un canal de eventos
+pub struct DownloadManager {
+    event_tx: broadcast::Sender<DownloadEvent>,
+    pipeline: Pipeline,
+    active_downloads: HashMap<Uuid, JoinHandle<()>>,
+}
+
+impl DownloadManager {
+    pub fn event_receiver(&self) -> broadcast::Receiver<DownloadEvent> {
+        self.event_tx.subscribe()
+    }
+}
+```
+
+#### Consumidores de eventos
+
+```rust
+// ─── Terminal (CLI) ───
+pub struct TerminalUi {
+    rx: broadcast::Receiver<DownloadEvent>,
+    progress_bars: HashMap<Uuid, ProgressBar>,
+}
+
+impl TerminalUi {
+    pub async fn run(&mut self) {
+        while let Ok(event) = self.rx.recv().await {
+            match event {
+                DownloadEvent::Progress { download_id, percent, speed, eta_secs, .. } => {
+                    if let Some(pb) = self.progress_bars.get_mut(&download_id) {
+                        if let Some(pct) = percent {
+                            pb.set_position(pct as u64);
+                        }
+                        pb.set_message(format!("{:.1} MB/s | ETA: {:?}s", speed / 1_000_000.0, eta_secs));
+                    }
+                }
+                DownloadEvent::Completed { download_id, result } => {
+                    if let Some(pb) = self.progress_bars.remove(&download_id) {
+                        pb.finish_with_message("✅ Completado");
+                    }
+                }
+                DownloadEvent::FatalError { download_id, error } => {
+                    eprintln!("❌ Error: {}", error);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+// ─── Tauri App (GUI) ───
+#[tauri::command]
+async fn start_download(app: tauri::AppHandle, url: String) -> Result<Uuid, String> {
+    let manager = app.state::<DownloadManager>();
+    let id = manager.submit(url, DownloadOptions::default()).await;
+    
+    // Escuchar eventos desde la GUI
+    let mut rx = manager.event_receiver();
+    let window = app.get_webview_window("main").unwrap();
+    
+    tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            // Enviar evento a la UI de Svelte
+            let _ = window.emit("download-event", &event);
+        }
+    });
+    
+    Ok(id)
+}
+
+// En Svelte:
+// import { listen } from '@tauri-apps/api/event';
+// listen('download-event', (event) => {
+//   // actualizar barra de progreso
+// });
+```
+
+---
+
+### 5. Retry with Exponential Backoff
+
+Los errores recuperables (timeout, 503, rate limit) se reintentan con espera exponencial.
+
+```rust
+const MAX_RETRIES: u8 = 5;
+const BASE_DELAY_MS: u64 = 1000;
+
+/// Calcula el delay para el intento N usando exponential backoff + jitter
+pub fn backoff_duration(attempt: u8) -> Duration {
+    let base = BASE_DELAY_MS * 2u64.pow(attempt as u32); // 1s, 2s, 4s, 8s, 16s
+    
+    // Añadir jitter: ±25% aleatorio
+    use rand::Rng;
+    let jitter = rand::thread_rng().gen_range(0..=base / 4);
+    
+    Duration::from_millis(base + jitter)
+}
+
+/// ¿Este error se puede reintentar?
+impl DownloadError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self,
+            Self::Timeout { .. } |
+            Self::RateLimited { .. } |
+            Self::ServerError { code: 500..=599, .. } |
+            Self::ConnectionReset |
+            Self::DnsFailure { .. }
+        )
+    }
+}
+
+// Uso en el pipeline:
+if let Err(e) = stage.execute(ctx).await {
+    if e.is_retryable() && ctx.attempt < MAX_RETRIES {
+        ctx.attempt += 1;
+        let delay = backoff_duration(ctx.attempt);
+        event_tx.send(DownloadEvent::RetryableError {
+            download_id: ctx.id,
+            error: e,
+            attempt: ctx.attempt,
+            next_retry_in_secs: delay.as_secs(),
+        });
+        tokio::time::sleep(delay).await;
+        // Reintentar desde RESOLVING (no desde el principio del todo)
+        continue;
+    }
+}
+```
+
+#### Errores retryables vs no-retryables
+
+| Error | Retryable? |
+|-------|-----------|
+| Timeout de conexión | ✅ Sí (el servidor puede recuperarse) |
+| 503 Service Unavailable | ✅ Sí |
+| 429 Rate Limited | ✅ Sí (con backoff más largo) |
+| Connection reset | ✅ Sí |
+| DNS timeout | ✅ Sí |
+| 404 Not Found | ❌ No (el archivo no existe) |
+| 403 Forbidden | ❌ No (necesitas credenciales) |
+| SSL certificate error | ❌ No |
+| Contraseña incorrecta | ❌ No |
+| Sin espacio en disco | ❌ No |
+| URL inválida | ❌ No |
+
+---
+
+### 6. Segmented Download (como IDM)
+
+IDM descarga archivos en partes paralelas. Esto es lo que lo hace rápido.
+
+```rust
+pub struct SegmentDownloader {
+    client: reqwest::Client,
+    num_threads: u32,
+}
+
+impl SegmentDownloader {
+    /// Descarga un archivo en N segmentos paralelos
+    pub async fn download(
+        &self,
+        url: &str,
+        output: &Path,
+        progress: impl Fn(SegmentProgress) + Send + 'static,
+    ) -> Result<DownloadStats, DownloadError> {
+        
+        // 1. HEAD request para obtener metadata
+        let head = self.client.head(url)
+            .send()
+            .await
+            .map_err(|e| DownloadError::network(e))?;
+        
+        let total_size = head
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or(DownloadError::UnknownSize)?;
+        
+        let supports_range = head
+            .headers()
+            .get("accept-ranges")
+            .map(|v| v == "bytes")
+            .unwrap_or(false);
+        
+        if !supports_range || total_size < 1024 * 1024 * 10 { // < 10MB
+            // Archivos pequeños: single thread
+            return self.download_single(url, output, progress).await;
+        }
+        
+        // 2. Dividir en segmentos
+        let segment_size = total_size / self.num_threads as u64;
+        let segments: Vec<Range> = (0..self.num_threads)
+            .map(|i| {
+                let start = i as u64 * segment_size;
+                let end = if i == self.num_threads - 1 {
+                    total_size - 1
+                } else {
+                    start + segment_size - 1
+                };
+                Range { start, end }
+            })
+            .collect();
+        
+        // 3. Descargar segmentos en paralelo
+        let mut handles = Vec::new();
+        let completed = Arc::new(AtomicU64::new(0));
+        
+        for (i, range) in segments.iter().enumerate() {
+            let client = self.client.clone();
+            let url = url.to_string();
+            let output = output.to_path_buf();
+            let seg_file = output.with_extension(format!("part{}", i));
+            let range = *range;
+            let completed = completed.clone();
+            
+            handles.push(tokio::spawn(async move {
+                let mut response = client
+                    .get(&url)
+                    .header("Range", format!("bytes={}-{}", range.start, range.end))
+                    .send()
+                    .await?;
+                
+                let mut file = tokio::fs::File::create(&seg_file).await?;
+                while let Some(chunk) = response.chunk().await? {
+                    file.write_all(&chunk).await?;
+                    completed.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                }
+                Ok::<_, DownloadError>(())
+            }));
+        }
+        
+        // 4. Esperar todos los segmentos
+        for handle in handles {
+            handle.await.map_err(|_| DownloadError::JoinError)??;
+        }
+        
+        // 5. Ensamblar archivo final
+        let mut output_file = tokio::fs::File::create(output).await?;
+        for i in 0..self.num_threads {
+            let seg_file = output.with_extension(format!("part{}", i));
+            let mut seg = tokio::fs::File::open(&seg_file).await?;
+            tokio::io::copy(&mut seg, &mut output_file).await?;
+            tokio::fs::remove_file(&seg_file).await?;
+        }
+        
+        Ok(DownloadStats {
+            total_bytes: total_size,
+            segments: segments.len() as u32,
+            duration: todo!(),
+        })
+    }
+}
+```
+
+#### Cuándo usar multi-hilo
+
+| Tamaño archivo | Threads recomendados | Ganancia vs 1 hilo |
+|---------------|---------------------|-------------------|
+| < 10 MB | 1 | Ninguna (overhead no vale la pena) |
+| 10-100 MB | 2 | ~1.5x |
+| 100 MB - 1 GB | 4 | ~2.5x |
+| 1 GB - 10 GB | 8 | ~4x |
+| > 10 GB | 16 | ~5x (limitado por ancho de banda) |
+
+---
+
+### 7. Queue Manager
+
+Múltiples descargas se encolan y ejecutan con límite de concurrentes.
+
+```rust
+pub struct QueueManager {
+    event_tx: broadcast::Sender<DownloadEvent>,
+    max_concurrent: usize,       // default: 3
+    queue: VecDeque<QueuedDownload>,
+    active: HashMap<Uuid, DownloadHandle>,
+    completed: Vec<DownloadResult>,
+}
+
+impl QueueManager {
+    /// Añadir una URL a la cola
+    pub async fn enqueue(&mut self, url: String, opts: DownloadOptions) -> Uuid {
+        let id = Uuid::new_v4();
+        self.queue.push_back(QueuedDownload { id, url, opts });
+        
+        let _ = self.event_tx.send(DownloadEvent::StateChanged {
+            download_id: id,
+            old_state: DownloadState::Queued,
+            new_state: DownloadState::Queued,
+        });
+        
+        self.try_process_next().await;
+        id
+    }
+
+    /// Procesar la siguiente descarga si hay espacio
+    async fn try_process_next(&mut self) {
+        while self.active.len() < self.max_concurrent {
+            if let Some(next) = self.queue.pop_front() {
+                let id = next.id;
+                let tx = self.event_tx.clone();
+                
+                let handle = tokio::spawn(async move {
+                    let mut pipeline = Pipeline::default();
+                    let mut ctx = DownloadContext::new(id, next.url, next.opts);
+                    let result = pipeline.execute(&mut ctx).await;
+                    
+                    let _ = tx.send(DownloadEvent::Completed {
+                        download_id: id,
+                        result: result.into_result(),
+                    });
+                });
+                
+                self.active.insert(id, DownloadHandle { task: handle });
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Obtener estado de la cola
+    pub fn status(&self) -> QueueStatus {
+        QueueStatus {
+            queued: self.queue.len(),
+            active: self.active.len(),
+            completed: self.completed.len(),
+            max_concurrent: self.max_concurrent,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueueStatus {
+    pub queued: usize,
+    pub active: usize,
+    pub completed: usize,
+    pub max_concurrent: usize,
+}
+```
+
+---
+
+### 8. File Layout final (cómo queda todo)
+
+```
+src-tauri/src/
+├── lib.rs                        ← Tauri app + re-exporta downloader
+├── main.rs                       ← Entry point Tauri
+│
+├── bin/
+│   └── cli.rs                    ← darkdm CLI (clap)
+│
+├── downloader/                   ← Engine compartido
+│   ├── mod.rs                    ← Re-exporta todo
+│   ├── pipeline.rs               ← Pipeline orchestrator
+│   ├── state.rs                  ← State machine
+│   ├── context.rs                ← DownloadContext
+│   ├── events.rs                 ← Event system
+│   │
+│   ├── stages/                   ← Pipeline stages
+│   │   ├── mod.rs
+│   │   ├── url_resolver.rs       ← Stage 1: HEAD + detectar tipo
+│   │   ├── link_extractor.rs     ← Stage 2: Plugin registry
+│   │   ├── download_engine.rs    │
+│   │   │   ├── direct.rs         ← Descarga single-thread
+│   │   │   ├── segmented.rs      ← Multi-hilo con Range
+│   │   │   └── resume.rs         ← Resume handler
+│   │   ├── hls.rs                ← HLS download
+│   │   ├── dash.rs               ← DASH download
+│   │   └── post_processor.rs     │
+│   │       ├── extract.rs        ← Archive extraction
+│   │       └── organizer.rs      ← Video/organize
+│   │
+│   ├── plugins/                  ← Site-specific extractors
+│   │   ├── mod.rs                ← Registry + trait
+│   │   ├── mediafire.rs
+│   │   ├── youtube.rs            ← yt-dlp wrapper
+│   │   ├── mega.rs
+│   │   ├── googledrive.rs
+│   │   ├── hls_detector.rs
+│   │   ├── dash_detector.rs
+│   │   └── generic_page.rs       ← Fallback genérico
+│   │
+│   ├── queue.rs                  ← Queue manager
+│   ├── retry.rs                  ← Exponential backoff
+│   └── progress.rs               ← Progress types
+│
+└── ...
+```
+
+---
 
 ## Comportamiento del CLI
 
