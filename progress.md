@@ -1,51 +1,31 @@
-# Session Progress Log
+## 2026-06-24 — DarkDM Spec Completion
 
-## Current State
+**Summary**: Spec del CLI nativo Rust completado (2000+ líneas, 8 patrones de diseño).
+- Pipeline Pattern (Chain of Responsibility)
+- State Machine (12 estados, transiciones explícitas)
+- Plugin Registry (SiteExtractor trait con prioridad)
+- Event System (broadcast channel → terminal + GUI)
+- Retry with Exponential Backoff (5 intentos, 1s→16s + jitter)
+- Segmented Download (multi-hilo como IDM)
+- Queue Manager (FIFO con límite de concurrentes)
+- File Layout (30+ archivos organizados)
 
-**Last Updated:** YYYY-MM-DD HH:MM
-**Session ID:** [optional]
-**Active Feature:** [feat-XXX - Feature Name]
+README actualizado reflejando: bash scripts funcionales, spec completado, roadmap futuro.
 
-## Status
+**Verified**: init.sh build passes
+**Completed**: feat-001 (darkdm-mediafire bash), feat-002 (native-cli spec)
+**Next**: feat-003 (Native Rust CLI Implementation)
 
-### What's Done
+---
 
-- [x] [Completed item 1]
-- [x] [Completed item 2]
+## 2026-06-24 18:58 — DarkDM
+**Summary**: Completado spec nativo Rust CLI para DarkDM: design.md, tasks.md, proposal.md en openspec. Engine compartido reqwest+scraper+clap entre CLI y Tauri app. Reemplazará scripts bash actuales.
+**Verified**: init.sh build passes, all spec files committed
+**Completed**: none
+---
 
-### What's In Progress
-
-- [ ] [Current work item]
-  - Details: [specific task]
-  - Blockers: [if any]
-
-### What's Next
-
-1. [Next action item]
-2. [Following action item]
-
-## Blockers / Risks
-
-- [ ] [Blocker 1]: [description, impact]
-- [ ] [Risk 1]: [description, mitigation]
-
-## Decisions Made
-
-- **[Decision 1]**: [description]
-  - Context: [why this decision was made]
-  - Alternatives considered: [what else was discussed]
-
-## Files Modified This Session
-
-- `path/to/file1.ts` - [brief description of change]
-- `path/to/file2.ts` - [brief description of change]
-
-## Evidence of Completion
-
-- [ ] Tests pass: `[command and output]`
-- [ ] Type check clean: `[command and output]`
-- [ ] Manual verification: `[what was tested]`
-
-## Notes for Next Session
-
-[Free-form notes that will help the next session pick up context]
+## 2026-06-23 11:49 — DarkDM
+**Summary**: Fixed darkdm-mediafire script: added --compressed to curl (fixes gzip binary issue), added --get-link flag to extract direct URL without downloading, improved regex patterns for current MediaFire HTML structure
+**Verified**: --get-link flag tested successfully against live MediaFire URL, init.sh build passes
+**Completed**: none
+---

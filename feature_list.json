@@ -11,15 +11,15 @@
     {
       "id": "feat-002",
       "name": "Native Rust CLI Spec (openspec)",
-      "description": "Spec detallado para el CLI Rust nativo 'darkdm' que reemplace los scripts bash con engine compartido con Tauri. Incluye descarga directa, MediaFire scraper, HLS, extractor, resume, multi-hilo.",
+      "description": "Spec de 2000+ líneas con 8 patrones de diseño: Pipeline, State Machine, Plugin Registry, Event System, Retry Backoff, Segmented Download, Queue Manager, File Layout. Cubre pros/cons, 10 casos de uso, manejo de errores, códigos de salida, YouTube plugin.",
       "dependencies": ["feat-001"],
-      "status": "in-progress",
-      "evidence": "openspec/changes/native-cli/ creado con design.md, tasks.md, proposal.md, .openspec.yaml"
+      "status": "completed",
+      "evidence": "openspec/changes/native-cli/ creado con design.md (2013 líneas), tasks.md, proposal.md, .openspec.yaml. README actualizado."
     },
     {
       "id": "feat-003",
       "name": "Native Rust CLI Implementation",
-      "description": "Implementar el engine Rust: reqwest download, MediaFire scraper con scraper crate, extracción de archives (ZIP/RAR/tar), barra de progreso indicatif, resume, y binario darkdm con clap",
+      "description": "Implementar el engine Rust: reqwest download, pipeline stages, state machine, page analyzer, plugins (MediaFire, YouTube), multi-hilo, resume, extractor, queue manager, y binario darkdm con clap",
       "dependencies": ["feat-002"],
       "status": "not-started",
       "evidence": ""

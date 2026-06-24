@@ -1,126 +1,228 @@
-# DarkDM — Video Download Manager for Linux
+# DarkDM — Gestor de Descargas para Linux (como IDM)
 
-DarkDM is a video download manager for Linux inspired by IDM. It detects HLS streams automatically from any streaming site and downloads them via ffmpeg — no DRM bypassing, just intercepting the stream URLs the page requests.
+DarkDM es un gestor de descargas para Linux inspirado en **IDM (Internet Download Manager)**.
+Detecta y descarga archivos, streams de video y contenido desde cualquier sitio web.
 
-## Architecture
+## Estado actual
 
 ```
-Vivaldi/Chrome (MV3 Extension)
-  ↓ webRequest.onSendHeaders detects .m3u8 URLs
-  ↓ Popup shows detected streams
-  ↓ fetch('http://localhost:8765/download')
-Native Host (Rust HTTP Server)
-  ↓ Downloads manifest with curl
-  ↓ Filters ad URLs injected by the site
-  ↓ Resolves relative segment URLs to absolute
-  ↓ ffmpeg -c copy (no re-encode, multiplexed stream)
-  ↓
-~/Descargas/DarkDM/video.mp4
+┌──────────────────────────────────────────────────────────────────┐
+│                                                                  │
+│  🟢 Bash scripts (funcional)   →   🟡 Spec completado           │
+│  ↓                                 ↓                            │
+│  darkdm-mediafire                openspec/changes/native-cli/   │
+│  darkdm-capture                  (2000+ líneas)                 │
+│  darkdm-cli                                                      │
+│  (Rust, solo HLS)                                                │
+│                                                                  │
+│  🔵 FUTURO: darkdm CLI nativo en Rust                           │
+│  → Engine compartido con Tauri                                   │
+│  → Multi-hilo, resume, plugins, pipeline                         │
+│  → Reemplaza todos los scripts                                   │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### Why HTTP server instead of native messaging?
+| Componente | Estado | Descripción |
+|---|---|---|
+| `darkdm-mediafire` (bash) | ✅ **Funcional** | Descarga desde MediaFire con `--get-link`, `--password`, resume, extracción RAR/ZIP/7z |
+| `darkdm-cli` (Rust) | ⚠️ Solo HLS | Descarga streams .m3u8 vía ffmpeg |
+| `darkdm-host` (Rust) | ✅ **Funcional** | Servidor HTTP para la extensión de Chrome |
+| Extension Chrome (MV3) | ✅ **Funcional** | Detecta streams HLS automáticamente |
+| Tauri App (Svelte + Rust) | ✅ **Funcional** | Lista archivos descargados |
+| **Spec CLI nativo** (openspec) | ✅ **Completado** | 2000+ líneas con patrones: Pipeline, State Machine, Plugin Registry, Event System |
+| CLI nativo en Rust | 🔜 **Próximo** | Engine compartido con Tauri, multi-hilo, resume, plugins |
 
-Chrome MV3 service workers go to sleep after ~30s of inactivity. When the user clicks download, the worker wakes up but `chrome.runtime.sendNativeMessage` fails silently — the host never launches. Video DownloadHelper solved this with `chrome.offscreen` API, but that only works for browser-native downloads. Since DarkDM needs to run `ffmpeg` (an external binary), it uses an HTTP server on `localhost:8765` instead. `fetch()` works reliably even when the service worker is dormant.
+## Scripts disponibles hoy
 
-## Quick Start
-
-### 1. Build and install native host
+### `darkdm-mediafire` — Descarga desde MediaFire
 
 ```bash
-cd native-host/
-cargo build --release
+# Descargar y extraer automáticamente
+darkdm-mediafire "https://www.mediafire.com/file/XXXX/archivo.rar/file"
+
+# Con contraseña para RAR protegido
+darkdm-mediafire "https://www.mediafire.com/file/XXXX/archivo.rar/file" --password "mipass"
+
+# Solo obtener el enlace directo (sin descargar)
+darkdm-mediafire "https://www.mediafire.com/file/XXXX/archivo.rar/file" --get-link
+
+# Usar enlace directo (si ya lo tienes)
+darkdm-mediafire --direct "https://download1350.mediafire.com/.../archivo.rar"
+
+# Destino personalizado
+darkdm-mediafire "https://..." ~/Videos --password "mipass"
+```
+
+**Comportamiento:**
+- Extrae automáticamente el link directo de la página de MediaFire
+- Descarga con curl (resume con `-C -`, timeout 1h, barra de progreso)
+- Extrae automáticamente: RAR (con/sin contraseña), ZIP, 7z, tar.gz, tar.xz
+- Conserva siempre el archivo original (nunca se borra)
+- Los videos extraídos van a `~/Descargas/DarkDM/` por defecto
+
+### `darkdm-cli` — Descarga streams HLS
+
+```bash
+darkdm-cli "https://cdn.ejemplo.com/stream.m3u8" video.mp4
+darkdm-cli "https://cdn.ejemplo.com/stream.m3u8" --referer "https://sitio.com"
+```
+
+### `darkdm-capture` — Captura nativa de tráfico TLS
+
+```bash
+darkdm-capture start   # Inicia tcpdump + SSLKEYLOGFILE
+darkdm-vivaldi         # Abre Vivaldi con claves TLS
+darkdm-capture stop    # Detiene y extrae segmentos .ts del PCAP
+```
+
+### `darkdm-host` — Servidor HTTP para la extensión
+
+```bash
+# Iniciar manualmente
+darkdm-host
+
+# O como servicio systemd
+systemctl --user start darkdm-host
+```
+
+## Extensión de Chrome
+
+```
+extension/
+├── manifest.json        ← MV3
+├── background.js        ← Detecta streams .m3u8 via webRequest
+├── content.js           ← Overlay flotante sobre videos
+├── hook.js              ← Intercepta fetch/XHR en la página
+├── popup/               ← Lista de streams detectados + botón descargar
+└── icons/
+```
+
+La extensión:
+1. Detecta automáticamente streams HLS via `webRequest.onSendHeaders`
+2. Muestra un overlay "⬇️ Descargar" sobre los videos
+3. Envía la descarga al `darkdm-host` via HTTP POST
+4. Soporta MV3 service workers (usa HTTP, no native messaging)
+
+## Spec del CLI nativo (próximo)
+
+El spec en `openspec/changes/native-cli/` define el futuro CLI `darkdm` en Rust:
+
+```bash
+# Ejemplo de cómo funcionará (no implementado aún)
+darkdm descargar "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+darkdm descargar "https://mediafire.com/file/XXXX/archivo.rar/file" --password "x"
+darkdm descargar "https://cdn.ejemplo.com/video.mp4" --threads 8
+darkdm info "https://www.youtube.com/watch?v=..."
+```
+
+### Patrones de diseño (2000+ líneas de spec)
+
+| Patrón | Descripción |
+|--------|-------------|
+| **Pipeline** | Stages independientes: Resolver → Extraer → Descargar → Post-procesar |
+| **State Machine** | 12 estados con transiciones explícitas (QUEUED → RESOLVING → DOWNLOADING → ...) |
+| **Plugin Registry** | Extractores por sitio: YouTube, MediaFire, Mega, Google Drive + fallback genérico |
+| **Event System** | `broadcast::channel` para terminal (indicatif) y GUI (Tauri events) |
+| **Retry Backoff** | 5 intentos con backoff exponencial 1s→16s + jitter |
+| **Segmented Download** | Multi-hilo tipo IDM con Range headers |
+| **Queue Manager** | Cola FIFO con límite de concurrentes |
+
+### Dependencias planeadas
+
+```toml
+clap = "4"          # CLI argument parser
+reqwest = "0.12"    # HTTP client nativo
+scraper = "0.20"    # HTML parsing (CSS selectors)
+indicatif = "0.17"  # Barra de progreso en terminal
+tokio = "1"         # Async runtime
+zip = "2"           # Extracción ZIP
+tar = "0.4"         # Extracción tar
+```
+
+## Estructura del proyecto
+
+```
+├── src-tauri/              ← Tauri Desktop App (Svelte + Rust)
+│   ├── src/lib.rs          ← Lógica Tauri (listar descargas)
+│   └── src-tauri/src/      ← Binarios y engine (futuro)
+│
+├── native-host/            ← Rust HTTP server + CLI
+│   ├── src/server.rs       ← HTTP server en :8765
+│   ├── src/downloader.rs   ← Engine HLS/DASH
+│   ├── src/bin/cli.rs      ← CLI para HLS
+│   └── src/bin/proxy*.rs   ← Proxies de captura
+│
+├── extension/              ← Chrome MV3 Extension
+│   ├── background.js       ← Detección de streams
+│   ├── content.js          ← Overlay de descarga
+│   └── popup/             ← UI de streams detectados
+│
+├── scripts/                ← Bash scripts funcionales
+│   ├── darkdm-mediafire    ← Descarga desde MediaFire
+│   ├── darkdm-capture      ← Captura TLS nativa
+│   ├── darkdm-debug        ← Logs en tiempo real
+│   ├── darkdm-vivaldi      ← Vivaldi con SSLKEYLOGFILE
+│   └── watch-downloads.sh  ← Monitor de descargas
+│
+├── openspec/               ← Spec-driven development
+│   └── changes/native-cli/ ← Spec del CLI nativo (2000+ líneas)
+│
+├── docs/                   ← Documentación
+├── dist/                   ← Build output
+├── init.sh                 ← Verificación del proyecto
+├── install.sh              ← Instalación de extensión + host
+├── feature_list.json       ← Estado de features
+└── progress.md             ← Log de sesiones
+```
+
+## Instalación
+
+```bash
+# 1. Clonar
+git clone https://github.com/JDis/darkdm && cd darkdm
+
+# 2. Verificar entorno
+./init.sh
+
+# 3. Scripts (disponibles en ~/.local/bin/)
+export PATH="$PATH:$PWD/scripts"
+cp scripts/darkdm-mediafire ~/.local/bin/
+
+# 4. Native host
+cd native-host && cargo build --release
 cp target/release/darkdm-host ~/.local/bin/
 
-# Install as systemd user service (auto-start on login)
-cp ../systemd/darkdm-host.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now darkdm-host
-
-# Verify
-curl http://localhost:8765/health
-# → {"status":"ok","version":"1.0.0"}
+# 5. Extensión de Chrome
+# vivaldi://extensions → Load unpacked → seleccionar extension/
 ```
 
-### 2. Load extension in Vivaldi/Chrome
-
-```
-vivaldi://extensions → Enable developer mode → Load unpacked → select extension/
-```
-
-### 3. Download a video
-
-1. Open any streaming site (pelisjuanita.com, etc.)
-2. Navigate to the movie/episode page — **no need to press play**
-3. Click the **DarkDM** extension icon — detected streams appear automatically
-4. Click **⬇️ Descargar**
-5. Check `~/Descargas/DarkDM/`
-
-> The extension intercepts `.m3u8` requests via `webRequest.onSendHeaders` as soon as the page loads them — before any video plays.
-
-## Dependencies
+## Dependencias
 
 ```bash
-sudo pacman -S ffmpeg curl
+# Esenciales (scripts bash)
+sudo pacman -S curl unrar p7zip
+
+# Native host + CLI Rust
+sudo pacman -S ffmpeg           # Para HLS
+sudo pacman -S rust cargo       # Para compilar native-host
+
+# YouTube (opcional, para el plugin futuro)
+pip install yt-dlp
 ```
 
-## Project Structure
+## Roadmap
 
 ```
-extension/        — Chrome/Vivaldi MV3 extension
-  background.js   — webRequest stream detection
-  popup/          — Stream list + download button
-native-host/      — Rust HTTP server (localhost:8765)
-  src/server.rs   — HTTP endpoints + ffmpeg launcher
-  src/downloader.rs — HLS/DASH download utilities
-openspec/         — Spec-driven change tracking
-scripts/          — Helper scripts
+Fase 1  [✅] Bash scripts funcionales (darkdm-mediafire con --get-link, --password, fix gzip, resume)
+Fase 2  [✅] Spec completo del CLI nativo (2000+ líneas, 8 patrones)
+Fase 3  [🔜] Engine de descarga universal en Rust (reqwest, multi-hilo, resume)
+Fase 4  [  ] CLI con clap (descargar, info, --json, --interactive)
+Fase 5  [  ] Page Analyzer genérico + plugins (MediaFire, YouTube, Mega)
+Fase 6  [  ] Integración con Tauri (engine compartido, eventos de progreso)
+Fase 7  [  ] Reemplazar todos los scripts bash por el CLI nativo
 ```
 
-## HTTP API
+## Licencia
 
-The native host exposes a simple REST API:
-
-```
-GET  /health          → {"status":"ok","version":"1.0.0"}
-POST /download        → Launch ffmpeg in background
-OPTIONS /download     → CORS preflight
-```
-
-### POST /download
-
-```json
-{
-  "manifest_url": "https://cdn.example.com/stream.m3u8",
-  "title": "Movie Title",
-  "page_url": "https://pelisjuanita.com/...",
-  "headers": {
-    "user-agent": "Mozilla/5.0 ...",
-    "referer": "https://pelisjuanita.com/..."
-  }
-}
-```
-
-Response:
-```json
-{"success": true, "message": "Download started", "output_path": "/home/dark/Descargas/DarkDM/Movie Title.mp4"}
-```
-
-## Known Limitations
-
-- Sites that inject TikTok/ad URLs into HLS manifests may fail (the host tries to filter them but not all cases are covered)
-- DRM-protected streams (Netflix, Disney+, Prime) are not supported — DarkDM only downloads streams the browser can play without DRM
-- The native host must be running before clicking download (`systemctl --user status darkdm-host`)
-
-## Status
-
-| Feature | Status |
-|---------|--------|
-| Auto-detect HLS streams via webRequest | ✅ Works |
-| HTTP server (replaces native messaging) | ✅ Works |
-| ffmpeg download (-c copy, no re-encode) | ✅ Works |
-| Ad URL filtering in manifests | 🔧 Partial (known sites) |
-| Multi-stream popup (per tab) | ✅ Works |
-| Stream dedup on page reload | ✅ Works |
-| Systemd auto-start | ✅ Works |
-| DASH streams | 🔜 TODO |
-| Download progress in popup | 🔜 TODO |
+MIT
