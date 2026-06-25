@@ -21,8 +21,8 @@
       "name": "Native Rust CLI Implementation",
       "description": "Implementar el engine Rust: reqwest download, pipeline stages, state machine, page analyzer, plugins (MediaFire, YouTube), multi-hilo, resume, extractor, queue manager, y binario darkdm con clap",
       "dependencies": ["feat-002"],
-      "status": "not-started",
-      "evidence": ""
+      "status": "in-progress",
+      "evidence": "src-tauri/src/downloader/ creado con piece.rs, probe.rs, transacted_io.rs, stages/piece_worker.rs. 10 tests pasando. Cargo.toml actualizado con reqwest, tokio, async-trait, futures-util, url, urlencoding."
     },
     {
       "id": "feat-004",

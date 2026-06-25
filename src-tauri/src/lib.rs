@@ -4,6 +4,9 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::State;
 
+// Download engine
+pub mod downloader;
+
 const DOWNLOADS_DIR: &str = "Descargas/DarkDM";
 
 #[derive(Debug, Serialize, Clone)]
