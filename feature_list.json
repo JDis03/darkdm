@@ -22,7 +22,7 @@
       "description": "Implementar el engine Rust: reqwest download, pipeline stages, state machine, page analyzer, plugins (MediaFire, YouTube), multi-hilo, resume, extractor, queue manager, y binario darkdm con clap",
       "dependencies": ["feat-002"],
       "status": "in-progress",
-      "evidence": "Core engine completo: piece.rs, probe.rs, transacted_io.rs, piece_manager.rs, download_engine.rs, piece_worker.rs, progress.rs. CLI darkdm con clap (descargar, info). Progress bar ILoveCandy (Pac-Man comiendo dots, custom sin indicatif). 19 tests pasando. Dependencies: reqwest, tokio, async-trait, futures-util, url, urlencoding, clap. CLI funcional: darkdm descargar probado con httpbin.org, archivo descargado exitosamente."
+      "evidence": "Core engine completo: piece.rs, probe.rs, transacted_io.rs, piece_manager.rs, download_engine.rs, piece_worker.rs, progress.rs. CLI darkdm con clap (descargar, info). Progress bar ILoveCandy. Multi-threaded download loop implementado (download_loop polling is_complete, EngineCallback auto-spawns workers). 19 tests pasando. Dependencies: reqwest, tokio, async-trait, futures-util, url, urlencoding, clap. CLI funcional: darkdm descargar probado con httpbin.org/bytes/102400, archivo 100K descargado exitosamente."
     },
     {
       "id": "feat-004",

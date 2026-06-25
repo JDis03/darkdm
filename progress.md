@@ -22,6 +22,34 @@
 **Completed**: none
 ---
 ---
+## 2026-06-25 — DarkDM Multi-threaded Download Loop
+**Summary**: Implementado download loop multi-threaded:
+- download_loop() espera a que todos los workers terminen (polling is_complete() cada 100ms)
+- spawn_worker() crea tasks individuales con tokio::spawn
+- EngineCallback auto-spawns nuevos workers en on_piece_complete()
+- on_piece_complete() → try_create_piece() → spawn_worker() (dynamic splitting)
+- Loop continúa hasta manager.is_complete()
+
+EngineCallback:
+- Ahora tiene url + output_path fields
+- Puede spawns workers sin referencia a DownloadEngine
+- Self-contained worker spawning
+
+Flow:
+1. download() crea pieza inicial (0..size)
+2. download_loop() spawns primer worker
+3. Worker descarga → on_piece_complete()
+4. on_piece_complete() → try_create_piece() → spawn_worker()
+5. Repeat hasta is_complete()
+6. Loop exits, progress bar finish()
+
+Tests: 19/19 passing
+CLI probado: darkdm descargar https://httpbin.org/bytes/102400 → /tmp/darkdm-test/102400 (100K) ✓
+**Verified**: cargo test --lib (19 passed), darkdm descargar functional, file downloaded, ./init.sh passes, git push successful
+**Completed**: none
+**Next**: Test con servidor que soporte Range para ver multi-threading en acción, plugins
+---
+---
 ## 2026-06-25 — DarkDM Engine + CLI + ILoveCandy Progress Bar
 **Summary**: Progress bar ILoveCandy (Pac-Man comiendo dots) añadido:
 - progress.rs: ProgressBar custom (sin indicatif)
