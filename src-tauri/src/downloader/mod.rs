@@ -11,6 +11,9 @@ pub mod download_engine;
 pub mod progress;
 pub mod disk_space;
 pub mod auto_rename;
+pub mod content_type;
+pub mod page_analyzer;
+pub mod hls_handler;
 
 pub mod stages;
 pub mod plugins;

@@ -1,3 +1,9 @@
+## 2026-06-25 11:42 — DarkDM
+**Summary**: Implementado disk space check + auto-rename. disk_space.rs usa libc::statvfs para verificar espacio disponible antes de descargar (Linux). auto_rename.rs evita sobrescribir archivos existentes (file.mp4 → file (1).mp4, soporta multi-ext .tar.gz). Auto-rename se aplica ANTES del check resumable para cubrir ambos paths (multi-threaded y single-threaded). 22 tests pasando (+3 nuevos). CLI verificado: auto-rename funcional (102400 → 102400 (1) → 102400 (2)). Commit f577229 pushed.
+**Verified**: cargo test --lib (22/22 passed), cargo build --release successful, CLI functional test (auto-rename verified with 3 sequential downloads), ./init.sh passes
+**Completed**: none
+---
+---
 ## 2026-06-25 11:20 — DarkDM
 **Summary**: Implementado multi-threaded download loop. download_loop() polling is_complete() cada 100ms. spawn_worker() crea tasks con tokio::spawn. EngineCallback auto-spawns nuevos workers en on_piece_complete() cuando try_create_piece() retorna nuevo ID. Flow: download() → download_loop() → spawn_worker() → on_piece_complete() → try_create_piece() → spawn_worker() → repeat hasta is_complete(). EngineCallback ahora tiene url + output_path para self-contained spawning. 19 tests pasando. CLI probado: darkdm descargar httpbin.org/bytes/102400 → 100K descargado exitosamente.
 **Verified**: cargo test --lib (19/19 passed), darkdm descargar functional, file downloaded /tmp/darkdm-test/102400 (100K), ./init.sh passes, git push successful (2 commits)

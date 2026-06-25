@@ -6,7 +6,10 @@
 
 use clap::{Parser, Subcommand};
 use app_lib::downloader::{DownloadEngine, DownloadConfig};
+use app_lib::downloader::{content_type, page_analyzer, hls_handler};
+use app_lib::downloader::plugins::{ExtractorRegistry, MediaFireExtractor, YouTubeExtractor};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "darkdm")]
@@ -76,6 +79,7 @@ async fn cmd_descargar(
         config.output_dir = output_dir;
     }
     
+    let config_clone = config.clone();
     let mut engine = DownloadEngine::new(url.clone(), config);
     
     // Probe first
@@ -90,9 +94,111 @@ async fn cmd_descargar(
     println!("  Resumable: {}", if probe.resumable { "yes" } else { "no" });
     if let Some(ct) = &probe.content_type {
         println!("  Content-Type: {}", ct);
+        
+        // Check if it's HTML - need to analyze page
+        if content_type::needs_extraction(ct) {
+            println!("\n⚠️  Detected HTML page, trying extractors...");
+            
+            // Setup plugin registry
+            let mut registry = ExtractorRegistry::new();
+            registry.register(Arc::new(YouTubeExtractor::new()));
+            registry.register(Arc::new(MediaFireExtractor::new()));
+            
+            let parsed_url = url::Url::parse(&url)?;
+            
+            // Try site-specific extractors first
+            if let Some(extractor) = registry.find_extractor(&parsed_url) {
+                println!("🔌 Using {} extractor...", extractor.name());
+                
+                match extractor.extract(&parsed_url).await {
+                    Ok(links) => {
+                        if links.is_empty() {
+                            eprintln!("❌ Extractor found no downloadable links");
+                            return Err("No videos found".into());
+                        }
+                        
+                        println!("\n📦 Found {} resource(s):", links.len());
+                        for (i, link) in links.iter().enumerate() {
+                            println!("  [{}] {}", i + 1, link.url);
+                            if let Some(title) = &link.filename {
+                                println!("      Title: {}", title);
+                            }
+                        }
+                        
+                        // Download first resource
+                        println!("\n⬇️  Downloading...\n");
+                        let target_url = links[0].url.clone();
+                        
+                        // Check if it's HLS
+                        if hls_handler::is_hls(&target_url) {
+                            let mut filename = links[0].filename.clone()
+                                .unwrap_or_else(|| "video".to_string());
+                            
+                            // Sanitize filename (remove invalid chars)
+                            filename = filename
+                                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
+                                .trim()
+                                .to_string();
+                            
+                            // Add .mp4 extension if missing
+                            if !filename.ends_with(".mp4") && !filename.ends_with(".mkv") {
+                                filename.push_str(".mp4");
+                            }
+                            
+                            let output_path = config_clone.output_dir.join(filename);
+                            
+                            hls_handler::download_hls(&target_url, &output_path, true).await?;
+                            println!("✅ Download complete!");
+                            return Ok(());
+                        }
+                        
+                        // Regular download
+                        let mut new_engine = DownloadEngine::new(target_url, config_clone);
+                        new_engine.probe().await?;
+                        new_engine.download(true).await?;
+                        
+                        println!("✅ Download complete!");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️  Extractor failed: {}", e);
+                        println!("Falling back to generic page analyzer...");
+                    }
+                }
+            }
+            
+            // Fallback: generic page analyzer
+            println!("🔍 Analyzing page for downloadable resources...");
+            let html = reqwest::get(&url).await?.text().await?;
+            let resources = page_analyzer::analyze_page(&html, &parsed_url);
+            
+            if resources.is_empty() {
+                eprintln!("❌ No downloadable resources found in page");
+                return Err("No videos, audios, or files detected".into());
+            }
+            
+            println!("\n📦 Found {} resource(s):", resources.len());
+            for (i, resource) in resources.iter().enumerate() {
+                println!("  [{}] {:?} - {}", i + 1, resource.resource_type, resource.url);
+                if let Some(title) = &resource.title {
+                    println!("      Title: {}", title);
+                }
+            }
+            
+            // Download first resource
+            println!("\n⬇️  Downloading first resource...\n");
+            let target_url = resources[0].url.clone();
+            
+            let mut new_engine = DownloadEngine::new(target_url, config_clone);
+            new_engine.probe().await?;
+            new_engine.download(true).await?;
+            
+            println!("✅ Download complete!");
+            return Ok(());
+        }
     }
     
-    // Start download
+    // Direct download (not HTML)
     println!("\n⬇️  Starting download...\n");
     engine.download(true).await?;
     
