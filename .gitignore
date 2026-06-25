@@ -1,25 +1,55 @@
 # Rust
 native-host/target/
 src-tauri/target/
+**/*.rs.bk
+Cargo.lock
 
 # Dependencies
 node_modules/
 
 # Build
-src-tauri/target/
 dist/
+dist-ssr/
+
+# Logs
+*.log
+logs/
+*.log.*
 
 # OS
 .DS_Store
 Thumbs.db
+*~
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*.swn
 
 # Local config
 .env
+.env.local
 *.local
 
 # Temp test files
 /tmp/
+*.tmp
+*.temp
+
+# Downloads (test artifacts)
+~/Descargas/DarkDM/
+*.part
+*.download
+
+# macOS
+.AppleDouble
+.LSOverride
+
+# Linux
+.directory
+
+# Windows
+desktop.ini
+ehthumbs.db
