@@ -14,6 +14,8 @@ pub struct ProgressBar {
     last_update: Instant,
     last_downloaded: u64,
     width: usize,
+    pacman_pos: usize,
+    pacman_direction: bool, // true = right, false = left
 }
 
 impl ProgressBar {
@@ -27,6 +29,8 @@ impl ProgressBar {
             last_update: Instant::now(),
             last_downloaded: 0,
             width: 40, // width of the bar itself
+            pacman_pos: 0,
+            pacman_direction: true,
         }
     }
     
@@ -73,10 +77,9 @@ impl ProgressBar {
         let speed_str = format_speed(speed);
         let eta_str = format_time(eta_secs as u64);
         
-        // Build progress bar
+        // Build progress bar (ILoveCandy style)
         let filled = (progress * self.width as f64) as usize;
-        let empty = self.width.saturating_sub(filled);
-        let bar = format!("{}{}", "#".repeat(filled), "-".repeat(empty));
+        let bar = self.build_pacman_bar(filled);
         
         // Truncate filename if too long
         let max_filename_len = 20;
@@ -101,6 +104,53 @@ impl ProgressBar {
         
         self.last_update = now;
         self.last_downloaded = self.downloaded;
+    }
+    
+    /// Build Pac-Man style progress bar (ILoveCandy)
+    fn build_pacman_bar(&mut self, filled: usize) -> String {
+        // Pac-Man characters
+        let pacman_open = if self.pacman_direction { "ᗧ" } else { "ᗤ" };
+        let pacman_closed = if self.pacman_direction { "ᗣ" } else { "ᗢ" };
+        
+        // Alternate between open and closed mouth
+        let pacman = if (self.pacman_pos / 2) % 2 == 0 {
+            pacman_open
+        } else {
+            pacman_closed
+        };
+        
+        // Update Pac-Man position
+        if self.pacman_direction {
+            self.pacman_pos += 1;
+            if self.pacman_pos >= self.width {
+                self.pacman_pos = self.width - 1;
+                self.pacman_direction = false;
+            }
+        } else {
+            if self.pacman_pos > 0 {
+                self.pacman_pos -= 1;
+            } else {
+                self.pacman_direction = true;
+            }
+        }
+        
+        // Build the bar
+        let mut bar = String::new();
+        
+        for i in 0..self.width {
+            if i == filled.min(self.width - 1) {
+                // Pac-Man position at the progress point
+                bar.push_str(pacman);
+            } else if i < filled {
+                // Eaten dots (empty space)
+                bar.push(' ');
+            } else {
+                // Uneaten dots
+                bar.push('·');
+            }
+        }
+        
+        bar
     }
     
     /// Finish the progress bar (print newline)

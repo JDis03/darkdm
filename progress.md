@@ -1,3 +1,9 @@
+## 2026-06-25 11:09 — DarkDM
+**Summary**: Implementado progress bar estilo pacman de Arch Linux. ProgressBar custom (sin indicatif) con formato: filename  45.2 MiB / 100 MiB  1234 KiB/s  00:38 [####] 100%. Updates cada 100ms, format_size/speed/time con KiB/MiB/GiB. Integrado en DownloadEngine via EngineCallback. CLI darkdm descargar muestra progress bar. Probado con httpbin.org/bytes/10240, archivo descargado exitosamente. 19 tests pasando (+3 progress). Docs actualizadas.
+**Verified**: cargo test --lib (19/19 passed), darkdm descargar functional, file downloaded to /tmp/darkdm-test/10240, ./init.sh passes, git push successful (2 commits)
+**Completed**: none
+---
+---
 ## 2026-06-25 10:57 — DarkDM
 **Summary**: Implementados PieceManager (orchestrator con dynamic splitting), DownloadEngine (coordinator con probe + download), y CLI darkdm con clap (descargar, info). PieceManager: try_create_piece() reintenta fallidos → divide la pieza activa más grande. DownloadEngine: probe() → ProbeResult, download() → multi-thread si resumable. CLI: darkdm info funcional, probado con httpbin.org. 16 tests pasando. Dependencies: clap, indicatif. CLI.md creado con docs completas.
 **Verified**: cargo test --lib (16/16 passed), cargo build --bin darkdm successful, darkdm info https://httpbin.org/bytes/1024 functional, ./init.sh passes, git push successful (4 commits)
@@ -10,10 +16,11 @@
 **Completed**: none
 ---
 ---
-## 2026-06-25 — DarkDM Engine + CLI + Progress Bar
-**Summary**: Progress bar estilo pacman añadido:
+## 2026-06-25 — DarkDM Engine + CLI + ILoveCandy Progress Bar
+**Summary**: Progress bar ILoveCandy (Pac-Man comiendo dots) añadido:
 - progress.rs: ProgressBar custom (sin indicatif)
-- Formato: filename  45.2 MiB / 100 MiB  1234 KiB/s  00:38 [####] 100%
+- Formato ILoveCandy: filename  45.2 MiB / 100 MiB  1234 KiB/s  00:38 [    ᗧ··········] 45%
+- Pac-Man (ᗧ/ᗣ) comiendo dots (·), boca abre/cierra, se mueve left/right
 - Updates cada 100ms (evita flickering)
 - format_size/speed/time con KiB/MiB/GiB (como pacman)
 - Integrado en DownloadEngine via EngineCallback

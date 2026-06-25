@@ -60,7 +60,7 @@ URL: https://example.com/file.mp4
 - ✅ Accept-Encoding: identity (critical for Range accuracy)
 - ✅ Content-Disposition filename parsing
 - ✅ Text redirect detection
-- ✅ Progress bar (pacman-style from Arch Linux)
+- ✅ Progress bar (ILoveCandy style — Pac-Man eating dots)
 
 ### In Progress
 
@@ -138,7 +138,7 @@ URL: https://httpbin.org/bytes/1024
 darkdm descargar "https://cdn.example.com/large-file.zip" --threads 16
 ```
 
-Output (pacman-style progress bar):
+Output (ILoveCandy progress bar):
 ```
 🔽 DarkDM — Downloading
 URL: https://cdn.example.com/large-file.zip
@@ -152,8 +152,10 @@ URL: https://cdn.example.com/large-file.zip
 
 ⬇️  Starting download...
 
-large-file.zip       45.2 MiB / 100.0 MiB  1234 KiB/s  00:38 [######################----------] 45%
+large-file.zip       45.2 MiB / 100.0 MiB  1234 KiB/s  00:38 [                  ᗧ··············] 45%
 ```
+
+The progress bar uses Pac-Man (ᗧ/ᗣ) eating dots (·) — just like pacman's `ILoveCandy` option!
 
 ## Comparison with bash scripts
 
@@ -161,7 +163,7 @@ large-file.zip       45.2 MiB / 100.0 MiB  1234 KiB/s  00:38 [##################
 |---------|------------------------|---------------|
 | Multi-thread | ❌ | ✅ (8 workers default) |
 | Resume | ❌ (curl -C fragile) | ✅ (TransactedIO) |
-| Progress | ❌ (curl bar only) | ✅ (pacman-style) |
+| Progress | ❌ (curl bar only) | ✅ (ILoveCandy) |
 | Dynamic splitting | ❌ | ✅ (work-stealing) |
 | Crash-safe state | ❌ | ✅ (3-file rotation) |
 | Dependencies | curl, unrar, 7z | None (static binary) |

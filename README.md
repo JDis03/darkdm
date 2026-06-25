@@ -23,6 +23,7 @@ darkdm info     "https://www.mediafire.com/file/XXXX/video.rar/file"
 
 | Component | What it does |
 |-----------|-------------|
+| `darkdm` CLI | Native Rust download manager with multi-threading, resume, ILoveCandy progress bar |
 | `darkdm-mediafire` | Downloads from MediaFire — extracts link, downloads, extracts RAR/ZIP with password |
 | `darkdm-host` | HTTP server on `:8765` — bridge between Chrome extension and the download engine |
 | `darkdm-cli` | Downloads HLS streams (`.m3u8`) via ffmpeg |
@@ -109,8 +110,9 @@ Key algorithms ported from [XDM](https://github.com/subhra74/xdm):
 ```
 ✅ Bash scripts + Chrome extension
 ✅ Full spec (2700+ lines, 8 patterns, 12 XDM algorithms)
-🔜 Rust engine — reqwest, dynamic piece-splitting, TransactedIO
-🔜 CLI — clap, darkdm descargar/info, --json
+✅ Rust engine — reqwest, dynamic piece-splitting, TransactedIO
+✅ CLI — clap, darkdm descargar/info, ILoveCandy progress bar
+🔜 Multi-threaded download loop (currently single worker)
 🔜 Plugins — MediaFire, YouTube, generic page analyzer
 🔜 Tauri — shared engine, real-time progress events
 ```
