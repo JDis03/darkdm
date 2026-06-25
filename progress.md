@@ -10,6 +10,26 @@
 **Completed**: none
 ---
 ---
+## 2026-06-25 — DarkDM Engine + CLI + Progress Bar
+**Summary**: Progress bar estilo pacman añadido:
+- progress.rs: ProgressBar custom (sin indicatif)
+- Formato: filename  45.2 MiB / 100 MiB  1234 KiB/s  00:38 [####] 100%
+- Updates cada 100ms (evita flickering)
+- format_size/speed/time con KiB/MiB/GiB (como pacman)
+- Integrado en DownloadEngine via EngineCallback
+- on_piece_progress() actualiza bar con total_downloaded
+- on_piece_complete() llama finish() cuando todo completo
+
+CLI:
+- darkdm descargar muestra progress bar
+- Probado: httpbin.org/bytes/10240 → /tmp/darkdm-test/10240 ✓
+
+Tests: 19/19 passing (+3 progress tests)
+**Verified**: cargo test --lib (19 passed), darkdm descargar functional, archivo descargado, ./init.sh passes, git push successful
+**Completed**: none
+**Next**: Multi-threaded download loop (actualmente solo 1 worker), resume, retry, plugins
+---
+---
 ## 2026-06-25 — DarkDM Engine + CLI Complete
 **Summary**: Engine completo + CLI funcional:
 - piece_manager.rs: PieceManager orchestrator con try_create_piece() (retry failed → split largest)

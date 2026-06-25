@@ -60,10 +60,10 @@ URL: https://example.com/file.mp4
 - ✅ Accept-Encoding: identity (critical for Range accuracy)
 - ✅ Content-Disposition filename parsing
 - ✅ Text redirect detection
+- ✅ Progress bar (pacman-style from Arch Linux)
 
 ### In Progress
 
-- 🔜 Progress bars (indicatif)
 - 🔜 Resume from partial downloads (TransactedIO state)
 - 🔜 Retry with exponential backoff
 - 🔜 Disk space check before download
@@ -138,17 +138,34 @@ URL: https://httpbin.org/bytes/1024
 darkdm descargar "https://cdn.example.com/large-file.zip" --threads 16
 ```
 
+Output (pacman-style progress bar):
+```
+🔽 DarkDM — Downloading
+URL: https://cdn.example.com/large-file.zip
+
+📡 Probing URL...
+✓ Probe complete:
+  Filename: large-file.zip
+  Size: 104857600 bytes (100.00 MB)
+  Resumable: yes
+  Content-Type: application/zip
+
+⬇️  Starting download...
+
+large-file.zip       45.2 MiB / 100.0 MiB  1234 KiB/s  00:38 [######################----------] 45%
+```
+
 ## Comparison with bash scripts
 
 | Feature | darkdm-mediafire (bash) | darkdm (Rust) |
 |---------|------------------------|---------------|
 | Multi-thread | ❌ | ✅ (8 workers default) |
 | Resume | ❌ (curl -C fragile) | ✅ (TransactedIO) |
-| Progress | ❌ (curl bar only) | ✅ (indicatif) |
+| Progress | ❌ (curl bar only) | ✅ (pacman-style) |
 | Dynamic splitting | ❌ | ✅ (work-stealing) |
 | Crash-safe state | ❌ | ✅ (3-file rotation) |
 | Dependencies | curl, unrar, 7z | None (static binary) |
-| Testing | Manual | 16 unit tests |
+| Testing | Manual | 19 unit tests |
 
 ## License
 
