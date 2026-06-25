@@ -55,6 +55,8 @@ impl PieceWorker {
         output_path: &std::path::Path,
         callback: Arc<dyn PieceCallback>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        tracing::debug!("Starting piece {}: range {}-{} ({} bytes)", 
+            piece.id, piece.start, piece.end, piece.end - piece.start + 1);
         callback.on_piece_start(piece.id).await;
         
         // Build Range header: "bytes=start-end"
@@ -71,9 +73,12 @@ impl PieceWorker {
         let status = response.status();
         if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
             let error = format!("HTTP {}: {}", status, response.text().await?);
+            tracing::error!("Piece {} failed: {}", piece.id, error);
             callback.on_piece_error(piece.id, error.clone()).await;
             return Err(error.into());
         }
+        
+        tracing::trace!("Piece {} received HTTP {}", piece.id, status);
         
         // Open file for writing at piece offset
         let file = tokio::fs::OpenOptions::new()
@@ -101,6 +106,7 @@ impl PieceWorker {
         }
         
         file.flush().await?;
+        tracing::debug!("Piece {} completed successfully", piece.id);
         callback.on_piece_complete(piece.id).await;
         
         Ok(())

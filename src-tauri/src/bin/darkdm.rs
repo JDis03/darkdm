@@ -6,7 +6,7 @@
 
 use clap::{Parser, Subcommand};
 use app_lib::downloader::{DownloadEngine, DownloadConfig};
-use app_lib::downloader::{content_type, page_analyzer, hls_handler};
+use app_lib::downloader::{content_type, page_analyzer, hls_handler, logger};
 use app_lib::downloader::plugins::{ExtractorRegistry, MediaFireExtractor, YouTubeExtractor};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,12 +37,31 @@ enum Commands {
         /// Disable resume
         #[arg(long)]
         no_resume: bool,
+        
+        /// Enable verbose logging (debug level)
+        #[arg(short, long)]
+        verbose: bool,
     },
     
     /// Get information about a URL without downloading
     Info {
         /// URL to probe
         url: String,
+        
+        /// Enable verbose logging (debug level)
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    
+    /// Show log file location and recent entries
+    Logs {
+        /// Number of recent lines to show (default: 50)
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: usize,
+        
+        /// Follow log file (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
     },
 }
 
@@ -50,12 +69,31 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     
+    // Initialize logging based on verbose flag
+    match &cli.command {
+        Commands::Descargar { verbose, .. } | Commands::Info { verbose, .. } => {
+            if *verbose {
+                logger::init_with_level("debug");
+            } else {
+                logger::init_with_level("info");
+            }
+        }
+        Commands::Logs { .. } => {
+            // Don't initialize logging for logs command
+        }
+    }
+    
+    tracing::info!("DarkDM CLI started");
+    
     match cli.command {
-        Commands::Descargar { url, output, threads, no_resume } => {
+        Commands::Descargar { url, output, threads, no_resume, verbose: _ } => {
             cmd_descargar(url, output, threads, !no_resume).await?;
         }
-        Commands::Info { url } => {
+        Commands::Info { url, verbose: _ } => {
             cmd_info(url).await?;
+        }
+        Commands::Logs { lines, follow } => {
+            cmd_logs(lines, follow)?;
         }
     }
     
@@ -84,7 +122,11 @@ async fn cmd_descargar(
     
     // Probe first
     println!("\n📡 Probing URL...");
+    tracing::info!("Starting probe for URL: {}", url);
     let probe = engine.probe().await?;
+    
+    tracing::debug!("Probe result: filename={}, size={:?}, resumable={}", 
+        probe.filename_or_default(), probe.resource_size, probe.resumable);
     
     println!("✓ Probe complete:");
     println!("  Filename: {}", probe.filename_or_default());
@@ -98,6 +140,7 @@ async fn cmd_descargar(
         // Check if it's HTML - need to analyze page
         if content_type::needs_extraction(ct) {
             println!("\n⚠️  Detected HTML page, trying extractors...");
+            tracing::info!("Content-Type indicates HTML, attempting extraction");
             
             // Setup plugin registry
             let mut registry = ExtractorRegistry::new();
@@ -109,6 +152,7 @@ async fn cmd_descargar(
             // Try site-specific extractors first
             if let Some(extractor) = registry.find_extractor(&parsed_url) {
                 println!("🔌 Using {} extractor...", extractor.name());
+                tracing::info!("Selected extractor: {}", extractor.name());
                 
                 match extractor.extract(&parsed_url).await {
                     Ok(links) => {
@@ -238,6 +282,47 @@ async fn cmd_info(url: String) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(redirect) = &probe.redirect_url {
             println!("  Redirect target: {}", redirect);
         }
+    }
+    
+    Ok(())
+}
+
+fn cmd_logs(lines: usize, follow: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let log_file = logger::get_log_file();
+    
+    println!("📋 DarkDM Logs");
+    println!("Location: {}", log_file.display());
+    
+    if !log_file.exists() {
+        println!("\n⚠️  No log file found yet. Run a download first.");
+        return Ok(());
+    }
+    
+    if follow {
+        println!("\n🔄 Following log file (Ctrl+C to stop)...\n");
+        // Use tail -f
+        let status = std::process::Command::new("tail")
+            .arg("-f")
+            .arg(&log_file)
+            .status()?;
+        
+        if !status.success() {
+            return Err("tail command failed".into());
+        }
+    } else {
+        println!("\n📄 Last {} lines:\n", lines);
+        // Use tail -n
+        let output = std::process::Command::new("tail")
+            .arg("-n")
+            .arg(lines.to_string())
+            .arg(&log_file)
+            .output()?;
+        
+        if !output.status.success() {
+            return Err("tail command failed".into());
+        }
+        
+        print!("{}", String::from_utf8_lossy(&output.stdout));
     }
     
     Ok(())

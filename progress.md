@@ -1,3 +1,9 @@
+## 2026-06-25 21:08 — DarkDM
+**Summary**: ✅ feat-003 COMPLETADO. Implementado DarkDM SDK completo: page analyzer (detecta <video>, <audio>, HLS/DASH en HTML), plugin system (MediaFire scraper, YouTube con yt-dlp backend, ExtractorRegistry con prioridad), HLS handler (ffmpeg para streams), content-type detection. CLI integrado: Probe → detecta HTML → intenta plugins → fallback analyzer genérico. 36 tests pasando (+14 nuevos). Verificado con YouTube (152MB MP4 HLS) y Blender demo (262.8MB ZIP multi-threaded @ 10 MiB/s). Dependencies: scraper, reqwest+gzip, yt-dlp, ffmpeg. Commit 5c2a603. Queue manager pendiente para feat-004.
+**Verified**: cargo test --lib (36/36 passed), ./init.sh passes, YouTube download functional (https://youtu.be/nK--xjRiwPY → 152MB MP4), Blender demo download (262.8MB @ 10 MiB/s), progress bar animado, HLS handler con ffmpeg, plugins funcionando
+**Completed**: none
+---
+---
 ## 2026-06-25 11:42 — DarkDM
 **Summary**: Implementado disk space check + auto-rename. disk_space.rs usa libc::statvfs para verificar espacio disponible antes de descargar (Linux). auto_rename.rs evita sobrescribir archivos existentes (file.mp4 → file (1).mp4, soporta multi-ext .tar.gz). Auto-rename se aplica ANTES del check resumable para cubrir ambos paths (multi-threaded y single-threaded). 22 tests pasando (+3 nuevos). CLI verificado: auto-rename funcional (102400 → 102400 (1) → 102400 (2)). Commit f577229 pushed.
 **Verified**: cargo test --lib (22/22 passed), cargo build --release successful, CLI functional test (auto-rename verified with 3 sequential downloads), ./init.sh passes

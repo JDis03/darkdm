@@ -101,21 +101,30 @@ impl DownloadEngine {
         let original_path = self.output_path.clone();
         self.output_path = auto_rename::auto_rename(&self.output_path);
         if original_path != self.output_path {
+            tracing::info!("Auto-renamed: {} → {}", 
+                original_path.display(), self.output_path.display());
             eprintln!("⚠️  File exists, renamed: {} → {}", 
                 original_path.display(), self.output_path.display());
         }
         
         // Check if resumable
         if !probe.resumable {
+            tracing::warn!("Server does not support Range requests, falling back to single-threaded download");
             return self.download_single_thread().await;
         }
         
         let resource_size = probe.resource_size
             .ok_or("Cannot determine resource size")?;
         
+        tracing::info!("Starting multi-threaded download: {} bytes ({:.2} MB)", 
+            resource_size, resource_size as f64 / 1024.0 / 1024.0);
+        
         // Check disk space before starting
         disk_space::check_disk_space(&self.output_path, resource_size)
-            .map_err(|e| format!("Disk space check failed: {}", e))?;
+            .map_err(|e| {
+                tracing::error!("Disk space check failed: {}", e);
+                format!("Disk space check failed: {}", e)
+            })?;
         
         // Initialize piece manager
         let mut manager = self.piece_manager.lock().await;
@@ -227,9 +236,11 @@ impl DownloadEngine {
                 output_path.clone(),
             ));
             let worker = PieceWorker::new(url.clone());
+            let piece_id = piece.id;
             
             tokio::spawn(async move {
                 if let Err(e) = worker.download_piece(piece, &output_path, callback).await {
+                    tracing::error!("Worker error for piece {}: {}", piece_id, e);
                     eprintln!("\nWorker error: {}", e);
                 }
             });

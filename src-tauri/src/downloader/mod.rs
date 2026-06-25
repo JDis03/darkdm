@@ -14,6 +14,7 @@ pub mod auto_rename;
 pub mod content_type;
 pub mod page_analyzer;
 pub mod hls_handler;
+pub mod logger;
 
 pub mod stages;
 pub mod plugins;
