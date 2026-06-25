@@ -9,6 +9,8 @@ pub mod transacted_io;
 pub mod piece_manager;
 pub mod download_engine;
 pub mod progress;
+pub mod disk_space;
+pub mod auto_rename;
 
 pub mod stages;
 pub mod plugins;

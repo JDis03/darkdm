@@ -4,6 +4,7 @@
 
 use crate::downloader::{ProbeResult, PieceManager, TransactedIO, ProgressBar};
 use crate::downloader::stages::{PieceWorker, PieceCallback};
+use crate::downloader::{disk_space, auto_rename};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -96,6 +97,14 @@ impl DownloadEngine {
         
         let probe = self.probe_result.as_ref().unwrap();
         
+        // Auto-rename if file exists (do this BEFORE resumable check)
+        let original_path = self.output_path.clone();
+        self.output_path = auto_rename::auto_rename(&self.output_path);
+        if original_path != self.output_path {
+            eprintln!("⚠️  File exists, renamed: {} → {}", 
+                original_path.display(), self.output_path.display());
+        }
+        
         // Check if resumable
         if !probe.resumable {
             return self.download_single_thread().await;
@@ -103,6 +112,10 @@ impl DownloadEngine {
         
         let resource_size = probe.resource_size
             .ok_or("Cannot determine resource size")?;
+        
+        // Check disk space before starting
+        disk_space::check_disk_space(&self.output_path, resource_size)
+            .map_err(|e| format!("Disk space check failed: {}", e))?;
         
         // Initialize piece manager
         let mut manager = self.piece_manager.lock().await;

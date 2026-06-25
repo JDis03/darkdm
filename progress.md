@@ -1,3 +1,9 @@
+## 2026-06-25 11:20 — DarkDM
+**Summary**: Implementado multi-threaded download loop. download_loop() polling is_complete() cada 100ms. spawn_worker() crea tasks con tokio::spawn. EngineCallback auto-spawns nuevos workers en on_piece_complete() cuando try_create_piece() retorna nuevo ID. Flow: download() → download_loop() → spawn_worker() → on_piece_complete() → try_create_piece() → spawn_worker() → repeat hasta is_complete(). EngineCallback ahora tiene url + output_path para self-contained spawning. 19 tests pasando. CLI probado: darkdm descargar httpbin.org/bytes/102400 → 100K descargado exitosamente.
+**Verified**: cargo test --lib (19/19 passed), darkdm descargar functional, file downloaded /tmp/darkdm-test/102400 (100K), ./init.sh passes, git push successful (2 commits)
+**Completed**: none
+---
+---
 ## 2026-06-25 11:15 — DarkDM
 **Summary**: Actualizado progress bar a ILoveCandy style (Pac-Man comiendo dots). Pac-Man (ᗧ/ᗣ) con animación de boca abre/cierra, se mueve left/right bouncing en bordes. Dots (·) representan trabajo restante, espacios = comidos. build_pacman_bar() genera barra animada. pacman_pos tracks posición, pacman_direction controla dirección. Formato: filename  45.2 MiB / 100 MiB  1234 KiB/s  00:38 [    ᗧ··········] 45%. 19 tests pasando. Docs actualizadas (CLI.md, README.md, feature_list, progress).
 **Verified**: cargo test --lib (19/19 passed), cargo build --release successful, ./init.sh passes, git push successful
