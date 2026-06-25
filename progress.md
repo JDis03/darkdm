@@ -4,6 +4,37 @@
 **Completed**: none
 ---
 ---
+## 2026-06-25 — DarkDM Engine + CLI Complete
+**Summary**: Engine completo + CLI funcional:
+- piece_manager.rs: PieceManager orchestrator con try_create_piece() (retry failed → split largest)
+- download_engine.rs: DownloadEngine coordinator (probe, download, spawn workers, EngineCallback)
+- bin/darkdm.rs: CLI con clap (descargar, info subcommands)
+
+PieceManager:
+- Dynamic splitting: busca pieza activa más grande con remaining >= 512KB
+- Retry failed pieces primero antes de crear nuevas
+- Max active workers (default 8)
+- Tests: init, split, no_split_too_small, max_active, retry_failed
+
+DownloadEngine:
+- probe() → ProbeResult (filename, size, resumable)
+- download() → multi-thread si resumable, single-thread fallback
+- EngineCallback implements PieceCallback (on_piece_complete → try_create_piece)
+- Tests: probe con httpbin.org
+
+CLI darkdm:
+- darkdm descargar <url> [--output DIR] [--threads N] [--no-resume]
+- darkdm info <url> (probe sin descargar)
+- Emoji output, clap derive
+- Probado: darkdm info https://httpbin.org/bytes/1024 ✓
+
+Dependencies: reqwest, tokio, async-trait, futures-util, url, urlencoding, clap 4.5, indicatif 0.17
+Tests: 16/16 passing
+**Verified**: cargo test --lib (16 passed), cargo build --bin darkdm, darkdm info functional, ./init.sh passes, git push successful
+**Completed**: none
+**Next**: Wire multi-threaded download loop, progress bars (indicatif), plugins (MediaFire, YouTube)
+---
+---
 ## 2026-06-25 — DarkDM Engine Core Primitives
 **Summary**: Implementados los 4 módulos core del download engine en Rust:
 - piece.rs: Piece con AtomicU64 + split() dinámico (min 512KB)
