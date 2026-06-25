@@ -8,6 +8,7 @@ pub mod probe;
 pub mod transacted_io;
 pub mod piece_manager;
 pub mod download_engine;
+pub mod progress;
 
 pub mod stages;
 pub mod plugins;
@@ -18,3 +19,4 @@ pub use probe::ProbeResult;
 pub use transacted_io::TransactedIO;
 pub use piece_manager::{PieceManager, PieceId};
 pub use download_engine::{DownloadEngine, DownloadConfig, DownloadState};
+pub use progress::ProgressBar;

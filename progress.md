@@ -1,3 +1,9 @@
+## 2026-06-25 10:57 — DarkDM
+**Summary**: Implementados PieceManager (orchestrator con dynamic splitting), DownloadEngine (coordinator con probe + download), y CLI darkdm con clap (descargar, info). PieceManager: try_create_piece() reintenta fallidos → divide la pieza activa más grande. DownloadEngine: probe() → ProbeResult, download() → multi-thread si resumable. CLI: darkdm info funcional, probado con httpbin.org. 16 tests pasando. Dependencies: clap, indicatif. CLI.md creado con docs completas.
+**Verified**: cargo test --lib (16/16 passed), cargo build --bin darkdm successful, darkdm info https://httpbin.org/bytes/1024 functional, ./init.sh passes, git push successful (4 commits)
+**Completed**: none
+---
+---
 ## 2026-06-25 10:42 — DarkDM
 **Summary**: Implementados 4 módulos core del download engine: piece.rs (AtomicU64 + split dinámico), probe.rs (ProbeResult desde headers), transacted_io.rs (crash-safe 3-file rotation), piece_worker.rs (PieceCallback trait + Accept-Encoding identity). 10 tests pasando. Dependencies: reqwest, tokio, async-trait, futures-util. feat-003 marcado in-progress.
 **Verified**: cargo test --lib (10/10 passed), ./init.sh build passes, git push successful (2 commits)

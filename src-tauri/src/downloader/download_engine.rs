@@ -2,7 +2,7 @@
 //
 // XDM reference: SingleSourceHTTPDownloader.cs, HTTPDownloaderBase.cs
 
-use crate::downloader::{ProbeResult, PieceManager, TransactedIO};
+use crate::downloader::{ProbeResult, PieceManager, TransactedIO, ProgressBar};
 use crate::downloader::stages::{PieceWorker, PieceCallback};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,7 +88,7 @@ impl DownloadEngine {
     }
     
     /// Start the download
-    pub async fn download(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn download(&mut self, show_progress: bool) -> Result<(), Box<dyn std::error::Error>> {
         // Probe if not already done
         if self.probe_result.is_none() {
             self.probe().await?;
@@ -116,8 +116,16 @@ impl DownloadEngine {
         file.set_len(resource_size).await?;
         drop(file);
         
+        // Create progress bar
+        let progress_bar = if show_progress {
+            Some(ProgressBar::new(probe.filename_or_default(), resource_size))
+        } else {
+            None
+        };
+        let progress_bar = Arc::new(Mutex::new(progress_bar));
+        
         // Start workers
-        self.spawn_workers().await?;
+        self.spawn_workers_with_progress(progress_bar).await?;
         
         Ok(())
     }
@@ -149,8 +157,11 @@ impl DownloadEngine {
         Ok(())
     }
     
-    /// Spawn worker tasks
-    async fn spawn_workers(&self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Spawn worker tasks with progress bar
+    async fn spawn_workers_with_progress(
+        &self,
+        progress_bar: Arc<Mutex<Option<ProgressBar>>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let manager = self.piece_manager.clone();
         let url = self.url.clone();
         let output_path = self.output_path.clone();
@@ -168,12 +179,12 @@ impl DownloadEngine {
             };
             
             if let Some(piece) = piece {
-                let callback = Arc::new(EngineCallback::new(manager.clone()));
+                let callback = Arc::new(EngineCallback::new(manager.clone(), progress_bar));
                 let worker = PieceWorker::new(url.clone());
                 
                 tokio::spawn(async move {
                     if let Err(e) = worker.download_piece(piece, &output_path, callback).await {
-                        eprintln!("Worker error: {}", e);
+                        eprintln!("\nWorker error: {}", e);
                     }
                 });
             }
@@ -198,33 +209,49 @@ impl DownloadEngine {
 /// Callback implementation for the engine
 struct EngineCallback {
     manager: Arc<Mutex<PieceManager>>,
+    progress_bar: Arc<Mutex<Option<ProgressBar>>>,
 }
 
 impl EngineCallback {
-    fn new(manager: Arc<Mutex<PieceManager>>) -> Self {
-        Self { manager }
+    fn new(manager: Arc<Mutex<PieceManager>>, progress_bar: Arc<Mutex<Option<ProgressBar>>>) -> Self {
+        Self { manager, progress_bar }
     }
 }
 
 #[async_trait::async_trait]
 impl PieceCallback for EngineCallback {
-    async fn on_piece_start(&self, piece_id: usize) {
-        println!("Piece {} started", piece_id);
+    async fn on_piece_start(&self, _piece_id: usize) {
+        // Piece started - no output needed
     }
     
-    async fn on_piece_progress(&self, piece_id: usize, bytes: u64) {
-        // Progress update - could emit events here
+    async fn on_piece_progress(&self, _piece_id: usize, _bytes: u64) {
+        // Update progress bar with total downloaded
+        let manager = self.manager.lock().await;
+        let total_downloaded = manager.total_downloaded();
+        drop(manager);
+        
+        let mut pb = self.progress_bar.lock().await;
+        if let Some(bar) = pb.as_mut() {
+            bar.update(total_downloaded);
+        }
     }
     
     async fn on_piece_complete(&self, piece_id: usize) {
-        println!("Piece {} complete", piece_id);
         let mut manager = self.manager.lock().await;
         manager.mark_complete(piece_id);
         
         // Try to create a new piece by splitting
-        if let Some(new_id) = manager.try_create_piece() {
-            println!("Created new piece {} by splitting", new_id);
+        if let Some(_new_id) = manager.try_create_piece() {
             // TODO: spawn new worker for this piece
+        }
+        
+        // Check if all complete
+        if manager.is_complete() {
+            drop(manager);
+            let mut pb = self.progress_bar.lock().await;
+            if let Some(bar) = pb.as_mut() {
+                bar.finish();
+            }
         }
     }
     

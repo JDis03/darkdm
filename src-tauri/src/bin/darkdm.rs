@@ -93,10 +93,10 @@ async fn cmd_descargar(
     }
     
     // Start download
-    println!("\n⬇️  Starting download...");
-    engine.download().await?;
+    println!("\n⬇️  Starting download...\n");
+    engine.download(true).await?;
     
-    println!("\n✅ Download complete!");
+    println!("✅ Download complete!");
     
     Ok(())
 }
