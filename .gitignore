@@ -2,7 +2,7 @@
 native-host/target/
 src-tauri/target/
 **/*.rs.bk
-Cargo.lock
+# Note: Cargo.lock is committed for binaries (darkdm, darkdm-host)
 
 # Dependencies
 node_modules/
