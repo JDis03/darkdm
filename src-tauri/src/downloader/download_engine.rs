@@ -124,8 +124,8 @@ impl DownloadEngine {
         };
         let progress_bar = Arc::new(Mutex::new(progress_bar));
         
-        // Start workers
-        self.spawn_workers_with_progress(progress_bar).await?;
+        // Start download loop with workers
+        self.download_loop(progress_bar).await?;
         
         Ok(())
     }
@@ -157,40 +157,70 @@ impl DownloadEngine {
         Ok(())
     }
     
-    /// Spawn worker tasks with progress bar
-    async fn spawn_workers_with_progress(
+    /// Download loop — spawns workers and waits for completion
+    async fn download_loop(
         &self,
         progress_bar: Arc<Mutex<Option<ProgressBar>>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::time::{sleep, Duration};
+        
         let manager = self.piece_manager.clone();
         let url = self.url.clone();
         let output_path = self.output_path.clone();
         
-        // Get initial piece
-        let piece_id = {
+        // Spawn initial worker
+        let initial_piece_id = {
             let mgr = manager.lock().await;
             mgr.piece_ids().first().copied()
         };
         
-        if let Some(id) = piece_id {
-            let piece = {
-                let mgr = manager.lock().await;
-                mgr.get_piece(id)
-            };
+        if let Some(id) = initial_piece_id {
+            self.spawn_worker(id, manager.clone(), url.clone(), output_path.clone(), progress_bar.clone()).await;
+        }
+        
+        // Wait for all workers to complete
+        loop {
+            sleep(Duration::from_millis(100)).await;
             
-            if let Some(piece) = piece {
-                let callback = Arc::new(EngineCallback::new(manager.clone(), progress_bar));
-                let worker = PieceWorker::new(url.clone());
-                
-                tokio::spawn(async move {
-                    if let Err(e) = worker.download_piece(piece, &output_path, callback).await {
-                        eprintln!("\nWorker error: {}", e);
-                    }
-                });
+            let mgr = manager.lock().await;
+            if mgr.is_complete() {
+                break;
             }
+            drop(mgr);
         }
         
         Ok(())
+    }
+    
+    /// Spawn a single worker for a piece
+    async fn spawn_worker(
+        &self,
+        piece_id: usize,
+        manager: Arc<Mutex<PieceManager>>,
+        url: String,
+        output_path: PathBuf,
+        progress_bar: Arc<Mutex<Option<ProgressBar>>>,
+    ) {
+        let piece = {
+            let mgr = manager.lock().await;
+            mgr.get_piece(piece_id)
+        };
+        
+        if let Some(piece) = piece {
+            let callback = Arc::new(EngineCallback::new(
+                manager.clone(),
+                progress_bar.clone(),
+                url.clone(),
+                output_path.clone(),
+            ));
+            let worker = PieceWorker::new(url.clone());
+            
+            tokio::spawn(async move {
+                if let Err(e) = worker.download_piece(piece, &output_path, callback).await {
+                    eprintln!("\nWorker error: {}", e);
+                }
+            });
+        }
     }
     
     /// Get download progress
@@ -210,11 +240,18 @@ impl DownloadEngine {
 struct EngineCallback {
     manager: Arc<Mutex<PieceManager>>,
     progress_bar: Arc<Mutex<Option<ProgressBar>>>,
+    url: String,
+    output_path: PathBuf,
 }
 
 impl EngineCallback {
-    fn new(manager: Arc<Mutex<PieceManager>>, progress_bar: Arc<Mutex<Option<ProgressBar>>>) -> Self {
-        Self { manager, progress_bar }
+    fn new(
+        manager: Arc<Mutex<PieceManager>>,
+        progress_bar: Arc<Mutex<Option<ProgressBar>>>,
+        url: String,
+        output_path: PathBuf,
+    ) -> Self {
+        Self { manager, progress_bar, url, output_path }
     }
 }
 
@@ -241,11 +278,33 @@ impl PieceCallback for EngineCallback {
         manager.mark_complete(piece_id);
         
         // Try to create a new piece by splitting
-        if let Some(_new_id) = manager.try_create_piece() {
-            // TODO: spawn new worker for this piece
+        if let Some(new_id) = manager.try_create_piece() {
+            // Spawn new worker for the new piece
+            let piece = manager.get_piece(new_id);
+            drop(manager);
+            
+            if let Some(piece) = piece {
+                let callback = Arc::new(EngineCallback::new(
+                    self.manager.clone(),
+                    self.progress_bar.clone(),
+                    self.url.clone(),
+                    self.output_path.clone(),
+                ));
+                let worker = PieceWorker::new(self.url.clone());
+                let output_path = self.output_path.clone();
+                
+                tokio::spawn(async move {
+                    if let Err(e) = worker.download_piece(piece, &output_path, callback).await {
+                        eprintln!("\nWorker error: {}", e);
+                    }
+                });
+            }
+        } else {
+            drop(manager);
         }
         
         // Check if all complete
+        let manager = self.manager.lock().await;
         if manager.is_complete() {
             drop(manager);
             let mut pb = self.progress_bar.lock().await;

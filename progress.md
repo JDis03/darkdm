@@ -1,3 +1,9 @@
+## 2026-06-25 11:15 — DarkDM
+**Summary**: Actualizado progress bar a ILoveCandy style (Pac-Man comiendo dots). Pac-Man (ᗧ/ᗣ) con animación de boca abre/cierra, se mueve left/right bouncing en bordes. Dots (·) representan trabajo restante, espacios = comidos. build_pacman_bar() genera barra animada. pacman_pos tracks posición, pacman_direction controla dirección. Formato: filename  45.2 MiB / 100 MiB  1234 KiB/s  00:38 [    ᗧ··········] 45%. 19 tests pasando. Docs actualizadas (CLI.md, README.md, feature_list, progress).
+**Verified**: cargo test --lib (19/19 passed), cargo build --release successful, ./init.sh passes, git push successful
+**Completed**: none
+---
+---
 ## 2026-06-25 11:09 — DarkDM
 **Summary**: Implementado progress bar estilo pacman de Arch Linux. ProgressBar custom (sin indicatif) con formato: filename  45.2 MiB / 100 MiB  1234 KiB/s  00:38 [####] 100%. Updates cada 100ms, format_size/speed/time con KiB/MiB/GiB. Integrado en DownloadEngine via EngineCallback. CLI darkdm descargar muestra progress bar. Probado con httpbin.org/bytes/10240, archivo descargado exitosamente. 19 tests pasando (+3 progress). Docs actualizadas.
 **Verified**: cargo test --lib (19/19 passed), darkdm descargar functional, file downloaded to /tmp/darkdm-test/10240, ./init.sh passes, git push successful (2 commits)
