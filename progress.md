@@ -1,3 +1,17 @@
+## 2026-06-25 — DarkDM Engine Core Primitives
+**Summary**: Implementados los 4 módulos core del download engine en Rust:
+- piece.rs: Piece con AtomicU64 + split() dinámico (min 512KB)
+- probe.rs: ProbeResult desde headers HTTP (size, resumable, filename, Content-Disposition parsing)
+- transacted_io.rs: Crash-safe state con rotación 3-file (state.1 ← state.2 ← tmp) + END marker
+- stages/piece_worker.rs: PieceWorker + PieceCallback trait (IoC) con Accept-Encoding: identity
+
+Dependencies: reqwest 0.12, tokio, async-trait, futures-util, url, urlencoding
+Tests: 10/10 passing (piece, probe, transacted_io, piece_worker)
+**Verified**: cargo test --lib (10 passed), ./init.sh build passes, git push successful
+**Completed**: none
+**Next**: PieceManager orchestrator, download_engine.rs, CLI binary con clap
+---
+---
 ## 2026-06-24 23:04 — DarkDM
 **Summary**: Spec actualizado con 12 algoritmos portados de XDM: dynamic piece-splitting, ContinueAdjacentPiece, TransactedIO, Accept-Encoding identity, ProbeResult, PieceCallback trait, text redirect, session expiry, disk space check, speed limiter, auto-rename, HLS byte-range. Spec ahora tiene 2725 líneas. Pusheado a GitHub.
 **Verified**: git push exitoso, wc -l = 2725
