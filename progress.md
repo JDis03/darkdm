@@ -1,3 +1,9 @@
+## 2026-06-25 10:42 — DarkDM
+**Summary**: Implementados 4 módulos core del download engine: piece.rs (AtomicU64 + split dinámico), probe.rs (ProbeResult desde headers), transacted_io.rs (crash-safe 3-file rotation), piece_worker.rs (PieceCallback trait + Accept-Encoding identity). 10 tests pasando. Dependencies: reqwest, tokio, async-trait, futures-util. feat-003 marcado in-progress.
+**Verified**: cargo test --lib (10/10 passed), ./init.sh build passes, git push successful (2 commits)
+**Completed**: none
+---
+---
 ## 2026-06-25 — DarkDM Engine Core Primitives
 **Summary**: Implementados los 4 módulos core del download engine en Rust:
 - piece.rs: Piece con AtomicU64 + split() dinámico (min 512KB)
