@@ -7,7 +7,7 @@
 use clap::{Parser, Subcommand};
 use app_lib::downloader::{DownloadEngine, DownloadConfig};
 use app_lib::downloader::{content_type, page_analyzer, hls_handler, logger};
-use app_lib::downloader::plugins::{ExtractorRegistry, MediaFireExtractor, YouTubeExtractor};
+use app_lib::downloader::plugins::{ExtractorRegistry, MediaFireExtractor, YouTubeExtractor, NetflixExtractor};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -146,6 +146,7 @@ async fn cmd_descargar(
             let mut registry = ExtractorRegistry::new();
             registry.register(Arc::new(YouTubeExtractor::new()));
             registry.register(Arc::new(MediaFireExtractor::new()));
+            registry.register(Arc::new(NetflixExtractor::new()));
             
             let parsed_url = url::Url::parse(&url)?;
             

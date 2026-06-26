@@ -39,6 +39,14 @@
       "dependencies": ["feat-004"],
       "status": "not-started",
       "evidence": ""
+    },
+    {
+      "id": "feat-netflix",
+      "name": "Netflix CDN Support",
+      "description": "NetflixExtractor plugin + documentación. Soporta URLs CDN directas (nflxso.net, nflxvideo.net) y URLs de página Netflix con cookies. Rama: feat/netflix.",
+      "dependencies": ["feat-003"],
+      "status": "testing",
+      "evidence": "✅ NetflixExtractor: detecta nflxso.net/nflxvideo.net/nflxext.com + netflix.com/watch/*. ✅ Direct CDN URL funciona sin modificaciones al engine (probe + download multi-threaded verificado: 9.17MB @ 10.1 MiB/s). ✅ 5 tests Netflix (detect, reject, filename, extract CDN). ✅ 43 tests total pasando. ✅ docs/NETFLIX.md completo. ✅ Rama feat/netflix creada desde main. ⚠️ Pendiente: --cookies flag, merge a main tras testing."
     }
   ]
 }

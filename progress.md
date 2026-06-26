@@ -1,3 +1,9 @@
+## 2026-06-25 21:21 — DarkDM
+**Summary**: ✅ Logging system integrado. Implementado logger.rs con tracing + tracing-subscriber: console (colored, INFO default) + file (rotating daily, ~/.local/share/darkdm/darkdm.YYYY-MM-DD.log, 5 max). CLI: --verbose flag (DEBUG), comando `darkdm logs` (-n lines, --follow). Logs estratégicos: probe (INFO), extraction (INFO), download (INFO), pieces (DEBUG), errors (ERROR). 38 tests pasando (+2 logging). Dependencies: tracing, tracing-subscriber, tracing-appender, chrono. Docs: docs/LOGGING.md (usage, env vars, debugging). Commit 2744dda. ./init.sh passes.
+**Verified**: cargo test --lib (38/38 passed), ./init.sh passes, darkdm logs command functional, log file rotation working (darkdm.YYYY-MM-DD.log), --verbose flag tested, RUST_LOG env var support verified, docs/LOGGING.md created
+**Completed**: none
+---
+---
 ## 2026-06-25 21:08 — DarkDM
 **Summary**: ✅ feat-003 COMPLETADO. Implementado DarkDM SDK completo: page analyzer (detecta <video>, <audio>, HLS/DASH en HTML), plugin system (MediaFire scraper, YouTube con yt-dlp backend, ExtractorRegistry con prioridad), HLS handler (ffmpeg para streams), content-type detection. CLI integrado: Probe → detecta HTML → intenta plugins → fallback analyzer genérico. 36 tests pasando (+14 nuevos). Verificado con YouTube (152MB MP4 HLS) y Blender demo (262.8MB ZIP multi-threaded @ 10 MiB/s). Dependencies: scraper, reqwest+gzip, yt-dlp, ffmpeg. Commit 5c2a603. Queue manager pendiente para feat-004.
 **Verified**: cargo test --lib (36/36 passed), ./init.sh passes, YouTube download functional (https://youtu.be/nK--xjRiwPY → 152MB MP4), Blender demo download (262.8MB @ 10 MiB/s), progress bar animado, HLS handler con ffmpeg, plugins funcionando
