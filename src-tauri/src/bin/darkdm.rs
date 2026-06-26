@@ -63,6 +63,33 @@ enum Commands {
         #[arg(short, long)]
         follow: bool,
     },
+    
+    /// Batch download multiple URLs from a file (one per line)
+    /// Useful for Netflix segments, playlists, or any multi-file content
+    Batch {
+        /// File containing URLs (one per line)
+        file: PathBuf,
+        
+        /// Output directory
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        
+        /// Number of parallel workers per file (default: 4)
+        #[arg(short = 't', long, default_value = "4")]
+        threads: usize,
+        
+        /// Concat all downloaded files into one (uses ffmpeg)
+        #[arg(short, long)]
+        concat: bool,
+        
+        /// Output filename for concatenated result (requires --concat)
+        #[arg(short = 'n', long)]
+        name: Option<String>,
+        
+        /// Enable verbose logging
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 #[tokio::main]
@@ -71,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Initialize logging based on verbose flag
     match &cli.command {
-        Commands::Descargar { verbose, .. } | Commands::Info { verbose, .. } => {
+        Commands::Descargar { verbose, .. } | Commands::Info { verbose, .. } | Commands::Batch { verbose, .. } => {
             if *verbose {
                 logger::init_with_level("debug");
             } else {
@@ -94,6 +121,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Logs { lines, follow } => {
             cmd_logs(lines, follow)?;
+        }
+        Commands::Batch { file, output, threads, concat, name, verbose: _ } => {
+            cmd_batch(file, output, threads, concat, name).await?;
         }
     }
     
@@ -283,6 +313,136 @@ async fn cmd_info(url: String) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(redirect) = &probe.redirect_url {
             println!("  Redirect target: {}", redirect);
         }
+    }
+    
+    Ok(())
+}
+
+/// Batch download multiple URLs from a file
+///
+/// Each line in the file should be a URL.
+/// Useful for Netflix DASH segments, HLS segments, or any multi-file content.
+/// Optional: concatenate all files into one with ffmpeg.
+async fn cmd_batch(
+    file: PathBuf,
+    output: Option<PathBuf>,
+    threads: usize,
+    concat: bool,
+    name: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("📦 DarkDM — Batch Download");
+    println!("File: {}", file.display());
+    
+    // Read URLs from file
+    let content = tokio::fs::read_to_string(&file).await
+        .map_err(|e| format!("Cannot read URL file: {}", e))?;
+    
+    let urls: Vec<String> = content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_string())
+        .collect();
+    
+    if urls.is_empty() {
+        return Err("No URLs found in file (skip empty lines and # comments)".into());
+    }
+    
+    tracing::info!("Batch download: {} URLs from {}", urls.len(), file.display());
+    println!("\n📄 Found {} URL(s)", urls.len());
+    println!("Workers per file: {}", threads);
+    println!("Concatenate: {}", if concat { "yes" } else { "no" });
+    
+    // Output directory
+    let output_dir = output.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        PathBuf::from(home).join("Descargas/DarkDM")
+    });
+    tokio::fs::create_dir_all(&output_dir).await?;
+    
+    // Download all URLs sequentially (parallel per URL)
+    let mut downloaded: Vec<PathBuf> = Vec::with_capacity(urls.len());
+    
+    for (i, url) in urls.iter().enumerate() {
+        println!("\n[{}/{}] Downloading: {}", i + 1, urls.len(), 
+            if url.len() > 60 { format!("{}...", &url[..57]) } else { url.clone() });
+        
+        let mut config = DownloadConfig::default();
+        config.max_workers = threads;
+        config.output_dir = output_dir.clone();
+        
+        let mut engine = DownloadEngine::new(url.clone(), config);
+        
+        match engine.probe().await {
+            Ok(probe) => {
+                println!("  → {} ({:.2} MB, resumable: {})", 
+                    probe.filename_or_default(),
+                    probe.resource_size.unwrap_or(0) as f64 / 1024.0 / 1024.0,
+                    if probe.resumable { "yes" } else { "no" });
+                
+                match engine.download(true).await {
+                    Ok(()) => {
+                        let path = engine.output_path().to_path_buf();
+                        downloaded.push(path);
+                        tracing::info!("[{}/{}] Downloaded successfully", i + 1, urls.len());
+                        println!("  ✅ Downloaded");
+                    }
+                    Err(e) => {
+                        tracing::error!("[{}/{}] Download failed: {}", i + 1, urls.len(), e);
+                        eprintln!("  ❌ Failed: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("[{}/{}] Probe failed: {}", i + 1, urls.len(), e);
+                eprintln!("  ❌ Probe failed: {}", e);
+            }
+        }
+    }
+    
+    println!("\n📊 Batch complete: {}/{} downloaded", downloaded.len(), urls.len());
+    
+    // Concatenate with ffmpeg if requested
+    if concat && downloaded.len() > 1 {
+        let output_name = name.unwrap_or_else(|| "output.mp4".to_string());
+        let output_path = output_dir.join(&output_name);
+        
+        println!("\n🔗 Concatenating with ffmpeg...");
+        tracing::info!("Concatenating {} files into {}", downloaded.len(), output_path.display());
+        
+        // Create concat file list
+        let concat_file = output_dir.join("concat_list.txt");
+        let mut concat_content = String::new();
+        for path in &downloaded {
+            concat_content.push_str(&format!("file '{}'\n", path.display()));
+        }
+        tokio::fs::write(&concat_file, concat_content).await?;
+        
+        // Run ffmpeg
+        let status = tokio::process::Command::new("ffmpeg")
+            .args(["-f", "concat", "-safe", "0"])
+            .args(["-i", &concat_file.to_string_lossy()])
+            .args(["-c", "copy"])
+            .args(["-y", &output_path.to_string_lossy()])
+            .status().await
+            .map_err(|e| format!("ffmpeg not found: {}. Install with: sudo pacman -S ffmpeg", e))?;
+        
+        if status.success() {
+            println!("  ✅ Concatenated: {}", output_path.display());
+            tracing::info!("Concatenation complete: {}", output_path.display());
+            
+            // Clean up concat file
+            tokio::fs::remove_file(&concat_file).await.ok();
+            
+            // Optional: remove segment files
+            println!("  💡 Run 'rm {}' to clean up segments", 
+                downloaded.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" "));
+        } else {
+            tracing::error!("ffmpeg concat failed");
+            eprintln!("  ❌ ffmpeg concatenation failed");
+        }
+    } else if concat && downloaded.len() <= 1 {
+        println!("\n⚠️  Need at least 2 files to concatenate");
     }
     
     Ok(())

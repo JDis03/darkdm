@@ -1,3 +1,9 @@
+## 2026-06-26 00:40 — DarkDM
+**Summary**: ✅ Netflix CDN testing branch creada. NetflixExtractor plugin: detecta CDN hosts (nflxso.net, nflxvideo.net, nflxext.com), pasa URLs directas sin modificar, usa yt-dlp para page URLs. Verificado con URL real Netflix: 9.17MB, 8 workers, 10.1 MiB/s, Range support. 43 tests (+5 Netflix). docs/NETFLIX.md. Commit 98026b1 en feat/netflix. No mergeado a main.
+**Verified**: cargo test --lib (43/43 passed), curl probe Netflix CDN (HTTP 200, video/mp4, 9.6MB, Accept-Ranges: bytes), darkdm info (probe OK: 9.17MB, resumable: yes), darkdm descargar (9.17MB, 8 workers, 10.1 MiB/s, ✅ complete), 5 Netflix tests passing, docs/NETFLIX.md created
+**Completed**: none
+---
+---
 ## 2026-06-25 21:21 — DarkDM
 **Summary**: ✅ Logging system integrado. Implementado logger.rs con tracing + tracing-subscriber: console (colored, INFO default) + file (rotating daily, ~/.local/share/darkdm/darkdm.YYYY-MM-DD.log, 5 max). CLI: --verbose flag (DEBUG), comando `darkdm logs` (-n lines, --follow). Logs estratégicos: probe (INFO), extraction (INFO), download (INFO), pieces (DEBUG), errors (ERROR). 38 tests pasando (+2 logging). Dependencies: tracing, tracing-subscriber, tracing-appender, chrono. Docs: docs/LOGGING.md (usage, env vars, debugging). Commit 2744dda. ./init.sh passes.
 **Verified**: cargo test --lib (38/38 passed), ./init.sh passes, darkdm logs command functional, log file rotation working (darkdm.YYYY-MM-DD.log), --verbose flag tested, RUST_LOG env var support verified, docs/LOGGING.md created

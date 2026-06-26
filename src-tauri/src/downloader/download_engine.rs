@@ -247,6 +247,11 @@ impl DownloadEngine {
         }
     }
     
+    /// Get the output file path after download
+    pub fn output_path(&self) -> &std::path::Path {
+        &self.output_path
+    }
+    
     /// Get download progress
     pub async fn progress(&self) -> f64 {
         let manager = self.piece_manager.lock().await;

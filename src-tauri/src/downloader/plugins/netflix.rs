@@ -1,106 +1,71 @@
 // Netflix CDN URL extractor
 //
-// Netflix uses token-authenticated CDN URLs (nflxso.net, nflxvideo.net).
-// Direct CDN URLs work as-is — no special headers needed.
-// For page URLs, uses yt-dlp with Netflix cookies.
+// ⚠️ CRITICAL yt-dlp does NOT support Netflix (not in its 1872 extractors).
+//    Each segment/range has a UNIQUE token — can't guess sequential IDs.
 //
-// Capturing CDN URLs:
-//   Chrome extension intercepts <video> src on netflix.com
-//   IDM on Windows captures nflxso.net URLs via browser integration
-//   URL format: https://occ-*.nflxso.net/so/soa7/*.mp4?v=1&e=<expiry>&t=<token>
+// Architecture (reverse-engineered from live captures):
 //
-// CDN URL anatomy:
-//   e=1782452026  — expiry Unix timestamp
-//   t=...         — HMAC token (time-limited)
-//   v=1           — API version
-//   .mp4          — container (may also be .isml for HLS)
+//   Two URL formats detected:
+//
+//   Type A — MP4 segment (small files, ~5-15 MB)
+//     https://*.nflxso.net/so/soa7/<id>.mp4?v=1&e=<exp>&t=<hmac>
+//     Content-Type: video/mp4
+//     Full small files (trailers, clips)
+//
+//   Type B — Byte-range chunk (the real streaming mechanism)
+//     https://*.nflxvideo.net/range/<start>-<end>?o=1&v=49&e=<exp>&t=<hmac>&sc=<ctx>
+//     Content-Type: application/octet-stream
+//     Each URL = specific byte range of a large video file (~500 KB each)
+//     Player requests these as it needs them (seeking, buffering)
+//
+// CDN servers:
+//   freenginx (Netflix custom nginx)
+//   Cache-Control: no-store (security)
+//   X-TCP-Info header with internal CDN telemetry
+//
+// Capture workflow (to get full video):
+//   1. Play Netflix video in Chrome/Firefox
+//   2. DevTools → Network tab → filter "nflxvideo.net" or "/range/"
+//   3. Copy ALL range URLs as they load during playback
+//   4. Save to file → darkdm batch urls.txt --concat --name movie.mp4
+//
+// Limitations:
+//   - Each /range/ URL is ONE-TIME-USE (token tied to specific byte range)
+//   - Each ~500 KB — a full movie needs hundreds of these
+//   - No way to get full file without capturing all range URLs
+//   - yt-dlp does NOT support Netflix (not a supported extractor)
 
 use crate::downloader::plugins::{SiteExtractor, DetectedLink, ExtractError};
 use async_trait::async_trait;
 use url::Url;
 
 /// Netflix CDN host patterns
+///
+/// Type A (.mp4):  *.nflxso.net
+/// Type B (/range/): *.nflxvideo.net  (primary streaming, byte-range requests)
+/// Extras:         *.nflxext.com
 const NETFLIX_CDN_HOSTS: &[&str] = &[
     "nflxso.net",
     "nflxvideo.net",
     "nflxext.com",
 ];
 
-/// NetflixExtractor — handles Netflix CDN URLs and page URLs
-pub struct NetflixExtractor {
-    /// Path to Netflix cookies.txt (optional)
-    /// Export from browser extension: cookies.txt
-    cookies_path: Option<String>,
-}
+/// NetflixExtractor — handles Netflix CDN URLs
+///
+/// Direct CDN URLs are passed through as-is (they work with the engine).
+/// Page URLs (netflix.com/watch/*) are NOT supported — yt-dlp can't handle Netflix.
+/// Use browser DevTools to capture segment URLs, save to file, and batch download.
+pub struct NetflixExtractor;
 
 impl NetflixExtractor {
     pub fn new() -> Self {
-        Self { cookies_path: None }
-    }
-    
-    /// Set cookies file path for page URL extraction
-    pub fn with_cookies(mut self, path: impl Into<String>) -> Self {
-        self.cookies_path = Some(path.into());
-        self
+        Self
     }
     
     /// Check if URL is a Netflix CDN URL
     fn is_cdn_url(url: &Url) -> bool {
         let host = url.host_str().unwrap_or("");
         NETFLIX_CDN_HOSTS.iter().any(|cdn| host.ends_with(*cdn))
-    }
-    
-    /// Check if URL is a Netflix page URL
-    fn is_page_url(url: &Url) -> bool {
-        let host = url.host_str().unwrap_or("");
-        host.ends_with("netflix.com")
-    }
-    
-    /// Extract CDN URLs using yt-dlp with cookies
-    async fn extract_with_ytdlp(&self, url: &Url) -> Result<Vec<DetectedLink>, ExtractError> {
-        // Build yt-dlp command
-        let mut cmd = tokio::process::Command::new("yt-dlp");
-        cmd.arg("--get-url")
-            .arg("--format")
-            .arg("best")
-            .arg(url.as_str());
-        
-        // Add cookies if available
-        if let Some(cookies) = &self.cookies_path {
-            cmd.arg("--cookies").arg(cookies);
-        }
-        
-        tracing::info!("Running yt-dlp for Netflix URL: {}", url);
-        tracing::debug!("yt-dlp command: yt-dlp --get-url --format best {}", url);
-        
-        let output = cmd.output().await
-            .map_err(|e| ExtractError::network(format!("yt-dlp not found: {}. Install with: pip install yt-dlp", e)))?;
-        
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!("yt-dlp failed: {}", stderr);
-            return Err(ExtractError::network(format!(
-                "yt-dlp extraction failed. Ensure Netflix cookies are valid.\n{}", 
-                stderr
-            )));
-        }
-        
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut links = Vec::new();
-        
-        for line in stdout.lines() {
-            let line = line.trim();
-            if !line.is_empty() {
-                links.push(DetectedLink::direct(line));
-            }
-        }
-        
-        if links.is_empty() {
-            return Err(ExtractError::not_found("No CDN URLs found from Netflix page. Ensure you have valid Netflix cookies."));
-        }
-        
-        tracing::info!("yt-dlp found {} CDN URL(s)", links.len());
-        Ok(links)
     }
 }
 
@@ -115,42 +80,26 @@ impl SiteExtractor for NetflixExtractor {
     }
     
     fn priority(&self) -> u8 {
-        90 // Below YouTube (95), above generic (10)
+        90 // Below YouTube (95), above generic page analyzer (10)
     }
     
     fn can_handle(&self, url: &Url) -> bool {
-        Self::is_cdn_url(url) || Self::is_page_url(url)
+        Self::is_cdn_url(url)
     }
     
     async fn extract(&self, url: &Url) -> Result<Vec<DetectedLink>, ExtractError> {
-        tracing::info!("NetflixExtractor handling: {}", url);
+        tracing::info!("NetflixExtractor handling CDN URL: {}", url);
         
-        // Direct CDN URL — pass through as-is
-        if Self::is_cdn_url(url) {
-            tracing::info!("Direct Netflix CDN URL detected — using as-is");
-            
-            // Extract filename from URL
-            let filename = url.path_segments()
-                .and_then(|segments| segments.last())
-                .map(|s| {
-                    // Remove query params from filename
-                    s.split('?').next().unwrap_or(s).to_string()
-                });
-            
-            return Ok(vec![DetectedLink::with_metadata(
-                url.as_str(),
-                filename,
-                None, // size unknown until probe
-            )]);
-        }
+        // Extract filename from URL path
+        let filename = url.path_segments()
+            .and_then(|segments| segments.last())
+            .map(|s| s.split('?').next().unwrap_or(s).to_string());
         
-        // Netflix page URL — use yt-dlp with cookies
-        if Self::is_page_url(url) {
-            tracing::info!("Netflix page URL detected — using yt-dlp extraction");
-            return self.extract_with_ytdlp(url).await;
-        }
-        
-        Err(ExtractError::not_found("Unknown Netflix URL format"))
+        Ok(vec![DetectedLink::with_metadata(
+            url.as_str(),
+            filename,
+            None, // size unknown until probe
+        )])
     }
 }
 
@@ -174,15 +123,10 @@ mod tests {
     
     #[test]
     fn test_detect_netflix_page() {
-        let urls = vec![
-            "https://www.netflix.com/watch/81280744",
-            "https://netflix.com/title/81280744",
-        ];
-        
-        for url_str in urls {
-            let url = Url::parse(url_str).unwrap();
-            assert!(NetflixExtractor::is_page_url(&url), "Should detect: {}", url_str);
-        }
+        // Netflix page URLs are NOT handled by this extractor
+        // yt-dlp doesn't support Netflix
+        let url = Url::parse("https://www.netflix.com/watch/81280744").unwrap();
+        assert!(!NetflixExtractor::is_cdn_url(&url), "Should NOT detect page URLs");
     }
     
     #[test]
@@ -196,7 +140,6 @@ mod tests {
         for url_str in urls {
             let url = Url::parse(url_str).unwrap();
             assert!(!NetflixExtractor::is_cdn_url(&url), "Should reject: {}", url_str);
-            assert!(!NetflixExtractor::is_page_url(&url), "Should reject: {}", url_str);
         }
     }
     
